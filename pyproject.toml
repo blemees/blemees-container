@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "blemees-container"
+version = "0.1.0"
+description = "Run blemees-agentd inside a sandboxed container with full operator/peer-mesh participation"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "blemees" }]
+requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+blemees-container = "blemees_container.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/blemees/blemees-container"
+Issues = "https://github.com/blemees/blemees-container/issues"
+Spec = "https://github.com/blemees/blemees-container/blob/main/docs/SPEC.md"
+Plan = "https://github.com/blemees/blemees-container/blob/main/docs/IMPLEMENTATION_PLAN.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/blemees_container"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "PIE", "SIM", "RUF"]
+ignore = ["E501"]
