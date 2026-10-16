@@ -870,10 +870,10 @@ Each connection carries a `source` record:
 ```python
 @dataclass(frozen=True, slots=True)
 class AgentdSource:
-    label: str                # "local" or container name
+    label: str  # "local" or container name
     kind: Literal["host", "container"]
     socket_path: Path
-    meta: dict | None         # contents of meta.json for containers; None for host
+    meta: dict | None  # contents of meta.json for containers; None for host
 ```
 
 The TUI computes a `source` for each client at connect time:
@@ -1130,7 +1130,7 @@ class ContainerEngine(Protocol):
         image: str,
         mounts: list[Mount],
         env: dict[str, str],
-        user: str | None,        # "uid:gid" or None for default
+        user: str | None,  # "uid:gid" or None for default
         workdir: str | None,
         entrypoint: list[str] | None,
         labels: dict[str, str],  # for engine-side discovery / cleanup
