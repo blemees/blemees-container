@@ -46,8 +46,11 @@ tooling. No auth, no resume.
 - **Step 5.** Reference image and entry-point script at
   `blemees-container/examples/`. Dockerfile installs `blemees-agent`,
   `blemees-peer`, `claude`, `codex`. Entry-point waits for
-  `/run/blemees/.ready` then `exec`s `blemees-agentd`. Smoke test:
-  `start` → connect via host CLI → close → `stop` round-trip.
+  `/run/blemees/.ready` then `exec`s `blemees-agentd`; on a 30s
+  timeout it exits 75 without starting the agentd (fail closed, per
+  [SPEC §9](SPEC.md#9-reference-image)). Smoke test:
+  `start` → connect via host CLI → close → `stop` round-trip, plus a
+  missing-sentinel case that asserts exit 75 and no `agentd.sock`.
 
 ## Phase 2 — "Agent CLIs authenticate"
 

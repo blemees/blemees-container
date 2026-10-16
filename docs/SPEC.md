@@ -428,6 +428,14 @@ session can be re-resumed from the last known good state. The
 behavior is opt-out: `blemees-container stop --no-capture` skips
 step 8 entirely.
 
+**Exception: the agentd never ran.** If `<engine> wait` reports
+the reference entrypoint's ready-timeout exit code (75, §9), the
+entrypoint gave up before `exec`ing `blemees-agentd`. Nothing in
+the container is newer than the pool entry, and the in-container
+session path may hold an incomplete copy-in or nothing at all.
+blemees-container skips step 8, warns, leaves the pool entry
+untouched, and releases the lock.
+
 **Lock semantics.** The lockfile is the source of truth for "is
 this session currently checked out". A live PID in the lockfile
 means a `blemees-container` process is actively managing that
@@ -559,15 +567,23 @@ Behavior:
 12. **Copy-in session** (if `--resume`) from
     `$XDG_STATE_HOME/blemees/sessions/<id>/` to the container's
     `<container-home>/.local/state/blemees/sessions/<id>/`.
-13. **Start the agent.** Either the engine's `start` if (10) used
-    `create`, or signal the entry-point if (10) used a sleep. The
-    agentd inside binds `/run/blemees/agentd.sock` and awaits
-    operator connections.
+13. **Start the agent.** Drop the ready sentinel
+    `$XDG_RUNTIME_DIR/blemees/containers/<name>/.ready` (seen as
+    `/run/blemees/.ready` through mount #1) — only after steps 11
+    and 12 have succeeded, never on a failure path. Then either the
+    engine's `start` if (10) used `create`, or signal the
+    entry-point if (10) used a sleep. The agentd inside binds
+    `/run/blemees/agentd.sock` and awaits operator connections.
 14. **Confirm the socket appeared.** Poll
     `$XDG_RUNTIME_DIR/blemees/containers/<name>/agentd.sock` until
     it exists, with a short timeout (5s default). Failure to
     appear means the container failed to bring up the agentd —
-    `blemees-container start` runs cleanup and exits non-zero.
+    this includes the reference entrypoint exiting on a
+    ready-sentinel timeout (§9). `blemees-container start` runs
+    cleanup and exits non-zero. Cleanup here removes the engine
+    container, the runtime subdir and the state subdir, and
+    releases the session lock. It never captures session state:
+    the pool entry stays at its pre-start state.
 15. **Print `<name>` and the session_id** to stdout, exit zero.
 
 If the engine command fails at step 9 or 10, `blemees-container`
@@ -598,6 +614,11 @@ Lifecycle:
    - On success, `os.replace(<id>.tmp, <id>)` to commit atomically.
    - On failure, log the failure, leave the host pool entry as-is
      (pre-start state), proceed.
+   - Skip this step, with a warning, if the container's exit code
+     is the reference entrypoint's ready-timeout code (75, §9). The
+     agentd never ran, so there is no newer state to capture, and
+     capturing would overwrite the pool entry with an incomplete
+     copy-in or an empty session.
 4. **Release the session lock**: `os.unlink` the `.lock` file in
    the session pool entry.
 5. **Capture container logs** (best-effort): `<engine> logs <name>`
@@ -751,7 +772,8 @@ Field notes:
   `false` if a fresh session was minted.
 - `captured_session` is `null` while the container is running. On
   `stop`, it's set to `<session_id>` after a successful capture, or
-  `null` if `--no-capture` or capture failed.
+  `null` if `--no-capture`, capture failed, or capture was skipped
+  because the agentd never ran (§4.2 step 3).
 - `auth_providers` and `auth_files` together describe what was
   copied in. Useful for `list --json` and forensic reconstruction.
   Each `auth_files[]` entry has a `mode`: `"access-only"` for
@@ -1014,6 +1036,7 @@ subprocess management.
 | Auth copy-in fails (file missing on host) | `blemees-container start` exits non-zero before starting the agent. Container is removed; lock (if any) is released |
 | `--auth <provider>` but host's access token is expired or expires within 5 min | `blemees-container start` refuses with a clear error directing user to re-auth on host. No container is created |
 | Access token expires mid-session inside the container | Agent's API calls start failing. Container's agentd reports the failure on its operator channel. User runs `blemees-container stop` (captures session state) and starts a fresh container if continuing |
+| Ready sentinel not seen within 30s (slow copy-in, or `start` died before dropping it) | Reference entrypoint exits 75 without starting `blemees-agentd` (fail closed, §9). If `start` is still running, its socket poll (§4.1 step 14) fails and it cleans up without capture; the lock is released and the pool entry is untouched. If `start` is gone, a later `stop` sees exit code 75 and skips capture (§4.2 step 3) |
 | Session capture (copy-out) fails on stop | `blemees-container stop` warns, leaves the host pool entry as-is (pre-start state), keeps the lock so a manual `cp` recovery is possible. Operator intervention required |
 | Concurrent `blemees-container stop` invocations on the same name | Second sees the engine has already exited and skips to capture / cleanup. Capture itself is idempotent (atomic replace) |
 | UID mismatch — container can't write `/run/blemees/agentd.sock` | Engine emits a permission error; `blemees-container start` surfaces it directly |
@@ -1050,13 +1073,25 @@ adopts).
   entrypoint script that:
   1. Waits for `/run/blemees/.ready` (a sentinel file
      `blemees-container start` drops after copy-in is complete) —
-     timeout 30s, then proceed anyway
+     timeout 30s. On timeout it writes an error to stderr and
+     exits with code 75 (`EX_TEMPFAIL`) **without** starting
+     `blemees-agentd`
   2. `exec`s `blemees-agentd`
 
 The "wait for ready" sentinel is the cleanest fix for the ordering
 problem (auth files needed before agent starts). `blemees-container`
 creates the file at the right point in the start sequence (§4.1
 step 13).
+
+The timeout **fails closed**. Proceeding without the sentinel would
+start an agentd with no auth and without the resumed session, and
+a later `stop` would capture that fresh or empty state over the
+host pool entry (§3.6 step 8) — silent session data loss. Exiting
+instead means no `agentd.sock` appears, so `start`'s socket poll
+(§4.1 step 14) surfaces the failure and cleans up. The dedicated
+exit code lets `stop` tell "agentd never ran" apart from a crash
+and skip capture (§4.2 step 3). Custom images that replace the
+entrypoint should keep both properties.
 
 **What users typically build on top:**
 
@@ -1242,9 +1277,10 @@ v0.1 engines support this naturally.
 5. **Reference image + entry-point script** at
    `blemees-container/examples/` — Dockerfile installing
    blemees-agent + blemees-peer + claude + codex; entry-point
-   waits on `/run/blemees/.ready` then `exec`s `blemees-agentd`.
-   Smoke test: a `start` + connect + close + `stop` round-trip
-   against the image. Medium.
+   waits on `/run/blemees/.ready` then `exec`s `blemees-agentd`,
+   or exits 75 on timeout (fail closed, §9). Smoke test: a
+   `start` + connect + close + `stop` round-trip against the
+   image, plus a missing-sentinel run. Medium.
 6. **`blemees-container` auth copy-in** — `--auth claude|codex`
    and `--auth-file`. Per-provider access-only extractors
    (one Python module each, schema work is the risk — needs
