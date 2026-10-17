@@ -1229,7 +1229,7 @@ class Mount:
 ```
 
 Driver implementations live in
-`blemees_container/engines/<name>.py`. The reference docker driver
+`src/blemees_container/engines/<name>.py`. The reference docker driver
 is straight subprocess-of-`docker` calls; `podman` and `nerdctl`
 drivers inherit from it and override only the binary name (and any
 flag differences). The abstraction is deliberately "boring" — every
@@ -1264,7 +1264,7 @@ v0.1 engines support this naturally.
      `meta.json`, `events.jsonl`, `usage.json`, etc.
    Small-to-medium depending on how the daemon currently lays out
    session state.
-3. **Engine driver protocol** in `blemees-container/blemees_container/engines/`
+3. **Engine driver protocol** in `blemees-container/src/blemees_container/engines/`
    per §11 — `ContainerEngine` Protocol, plus the docker
    implementation as the reference. Auto-detection. Mount /
    Env / cp helpers. Small; mostly subprocess wrangling.
