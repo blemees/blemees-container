@@ -47,6 +47,9 @@ blemees-container logs <name> [--follow]
 blemees-container rm <name>
 ```
 
+In v0.1 the subcommands are stubs that exit 69 (`EX_UNAVAILABLE`);
+usage errors exit 2.
+
 ## How it fits
 
 ```

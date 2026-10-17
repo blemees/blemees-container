@@ -162,18 +162,23 @@ addressing already exposes their identities.
 4. `HOST` must be non-empty and may contain `:`. A relative `HOST`
    is resolved to an absolute path against the cwd.
 
-Anything else is a usage error: `start` exits non-zero before it
-calls the engine. Example: `/data/a:b:/mnt/x:ro` → host `/data/a:b`,
-container `/mnt/x`, read-only.
+Anything else is a usage error. `start` checks this in §4.1 step 1,
+so it exits non-zero before it takes the lock, creates directories,
+writes `meta.json` or calls the engine. Example:
+`/data/a:b:/mnt/x:ro` → host `/data/a:b`, container `/mnt/x`,
+read-only.
 
 **Engine `--mount` flags.** `blemees-container` builds each flag
 itself as `type=bind,source=<abs>,target=<abs>[,readonly]`. A source
 or target path (the mounts above, `--home`, every `--mount`) that
-contains a comma, a double quote, or a control character (newline
-included) is rejected with an error that names the path. There is no
-quoting or escaping: docker parses the flag as CSV, but podman and
-nerdctl do not document the same quoting, so rejection is the one
-rule that is safe on all three engines.
+contains a comma, a double quote, or a control character is rejected
+with an error that names the path and says why (e.g. "contains a
+comma, which cannot be passed safely in an engine --mount flag").
+A control character is any character `c` with
+`unicodedata.category(c) == "Cc"` (C0, DEL and C1, newline
+included). There is no quoting or escaping: docker parses the flag
+as CSV, but podman and nerdctl do not document the same quoting, so
+rejection is the one rule that is safe on all three engines.
 
 `--auth-file` paths go through `<engine> cp`, not `--mount`, so only
 the grammar rule applies to them.
@@ -302,9 +307,11 @@ state per §3.6) and starts a fresh container if they want to
 continue.
 
 `--auth-file` is verbatim: it's an escape hatch for non-standard
-layouts or providers we don't have a built-in helper for. **Verbatim
-copies are not access-only** — the user is opting into copying
-whatever they pointed at, including any refresh token. The `mode`
+layouts or providers we don't have a built-in helper for. Its
+`<container-path>` is absolute (§3.1.1), not relative to
+`--container-home`. **Verbatim copies are not access-only** — the
+user is opting into copying whatever they pointed at, including any
+refresh token. The `mode`
 field in `meta.json` (§6) records whether each auth entry was
 `"access-only"` or `"verbatim"` so this is auditable.
 
@@ -530,6 +537,9 @@ blemees-container logs <name> [--follow]
 blemees-container rm <name>
 ```
 
+In v0.1 the subcommands are stubs that exit 69 (`EX_UNAVAILABLE`);
+usage errors exit 2.
+
 ### 4.1 `start`
 
 ```
@@ -561,7 +571,9 @@ managed via `start` / `stop` / `logs --follow`.
 Behavior:
 
 1. **Validate** `<name>` (alias grammar, not already in use as a
-   container name in either runtime or state directories).
+   container name in either runtime or state directories) and every
+   path argument per §3.1.1. This runs before the lock, the
+   directories and `meta.json` are touched.
 2. **Resolve `--home`** to canonical form via `normalize_path`
    (paths under `~` rewritten, outside stay absolute).
 3. **Resolve session ID:**
@@ -594,8 +606,10 @@ Behavior:
       agent's main process run yet (e.g. `docker create` then
       `docker cp` then `docker start`, or run with a sleeping
       entry-point until copy-in completes).
-11. **Copy-in auth** (the access-only blob and any `--auth-file`s)
-    to `--container-home`-relative destinations.
+11. **Copy-in auth.** Each `--auth-file` is copied to its absolute
+    `CONTAINER` destination (§3.1.1). The access-only provider blobs
+    (`--auth claude|codex`) go to their fixed paths under
+    `--container-home` (§3.5).
 12. **Copy-in session** (if `--resume`) from
     `$XDG_STATE_HOME/blemees/sessions/<id>/` to the container's
     `<container-home>/.local/state/blemees/sessions/<id>/`.
