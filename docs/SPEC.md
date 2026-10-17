@@ -150,6 +150,39 @@ is "same-user same-machine"; the two-mount form keeps containers
 from scanning each other through the filesystem even though peer
 addressing already exposes their identities.
 
+#### 3.1.1 Path arguments and engine `--mount` flags
+
+**`HOST:CONTAINER[:ro]` grammar** (`--mount` and `--auth-file`,
+§4.1):
+
+1. If the argument ends with `:ro`, strip it and mark the entry
+   read-only.
+2. Split the rest at the **rightmost** `:`.
+3. `CONTAINER` must be an absolute path and must not contain `:`.
+4. `HOST` must be non-empty and may contain `:`. A relative `HOST`
+   is resolved to an absolute path against the cwd.
+
+Anything else is a usage error. `start` checks this in §4.1 step 1,
+so it exits non-zero before it takes the lock, creates directories,
+writes `meta.json` or calls the engine. Example:
+`/data/a:b:/mnt/x:ro` → host `/data/a:b`, container `/mnt/x`,
+read-only.
+
+**Engine `--mount` flags.** `blemees-container` builds each flag
+itself as `type=bind,source=<abs>,target=<abs>[,readonly]`. A source
+or target path (the mounts above, `--home`, every `--mount`) that
+contains a comma, a double quote, or a control character is rejected
+with an error that names the path and says why (e.g. "contains a
+comma, which cannot be passed safely in an engine --mount flag").
+A control character is any character `c` with
+`unicodedata.category(c) == "Cc"` (C0, DEL and C1, newline
+included). There is no quoting or escaping: docker parses the flag
+as CSV, but podman and nerdctl do not document the same quoting, so
+rejection is the one rule that is safe on all three engines.
+
+`--auth-file` paths go through `<engine> cp`, not `--mount`, so only
+the grammar rule applies to them.
+
 ### 3.2 Environment
 
 Every blemees-container-launched container receives:
@@ -274,9 +307,11 @@ state per §3.6) and starts a fresh container if they want to
 continue.
 
 `--auth-file` is verbatim: it's an escape hatch for non-standard
-layouts or providers we don't have a built-in helper for. **Verbatim
-copies are not access-only** — the user is opting into copying
-whatever they pointed at, including any refresh token. The `mode`
+layouts or providers we don't have a built-in helper for. Its
+`<container-path>` is absolute (§3.1.1), not relative to
+`--container-home`. **Verbatim copies are not access-only** — the
+user is opting into copying whatever they pointed at, including any
+refresh token. The `mode`
 field in `meta.json` (§6) records whether each auth entry was
 `"access-only"` or `"verbatim"` so this is auditable.
 
@@ -502,6 +537,9 @@ blemees-container logs <name> [--follow]
 blemees-container rm <name>
 ```
 
+In v0.1 the subcommands are stubs that exit 69 (`EX_UNAVAILABLE`);
+usage errors exit 2.
+
 ### 4.1 `start`
 
 ```
@@ -523,13 +561,19 @@ blemees-container start <name>
     [-- <agent-cmd> ...]            (override the image's entrypoint)
 ```
 
+`--mount` and `--auth-file` values, and every path that becomes an
+engine `--mount` flag (including `--home`), follow the rules in
+§3.1.1.
+
 The CLI always detaches; there is no foreground mode. Lifecycle is
 managed via `start` / `stop` / `logs --follow`.
 
 Behavior:
 
 1. **Validate** `<name>` (alias grammar, not already in use as a
-   container name in either runtime or state directories).
+   container name in either runtime or state directories) and every
+   path argument per §3.1.1. This runs before the lock, the
+   directories and `meta.json` are touched.
 2. **Resolve `--home`** to canonical form via `normalize_path`
    (paths under `~` rewritten, outside stay absolute).
 3. **Resolve session ID:**
@@ -562,8 +606,10 @@ Behavior:
       agent's main process run yet (e.g. `docker create` then
       `docker cp` then `docker start`, or run with a sleeping
       entry-point until copy-in completes).
-11. **Copy-in auth** (the access-only blob and any `--auth-file`s)
-    to `--container-home`-relative destinations.
+11. **Copy-in auth.** Each `--auth-file` is copied to its absolute
+    `CONTAINER` destination (§3.1.1). The access-only provider blobs
+    (`--auth claude|codex`) go to their fixed paths under
+    `--container-home` (§3.5).
 12. **Copy-in session** (if `--resume`) from
     `$XDG_STATE_HOME/blemees/sessions/<id>/` to the container's
     `<container-home>/.local/state/blemees/sessions/<id>/`.
@@ -1030,6 +1076,7 @@ subprocess management.
 | Container start failed (image not found, mount denied, etc.) | `blemees-container` removes any partial `containers/<name>/` it created, releases any session lock it acquired, and exits non-zero |
 | Container process crashes after start | `agentd.sock` becomes stale; TUI's discovery probes it, gets connection-refused, marks the source as down. `blemees-container list` shows `state: dead`. Best-effort capture: if the container's agentd had time to flush, `blemees-container stop --force` still copies whatever is there to the host pool. Otherwise the resumed session is left in its pre-start state and the resume lock is released |
 | `peerd.sock` mount missing | Container's MCP sidecar emits the existing "peerd unavailable" tool errors per `blemees-peer` SPEC §10. Agentd channel still works |
+| `--mount`/`--auth-file`/`--home` path breaks the rules in §3.1.1 | `start` exits non-zero with a usage error naming the argument; no engine call, no state changes |
 | `--resume <id>` but session not in pool | `blemees-container start` exits non-zero before touching the engine. No partial state |
 | `--resume <id>` but session is locked by a live container | `blemees-container start` checks the lockfile's PID; if alive, exits with `session 'X' is currently checked out by container 'Y' (pid 4711)`. Suggests `blemees-container stop Y` first |
 | `--resume <id>` but session is locked by a dead PID | `blemees-container start` takes over the stale lock, logs a warning naming the prior holder, and proceeds |
@@ -1229,7 +1276,7 @@ class Mount:
 ```
 
 Driver implementations live in
-`blemees_container/engines/<name>.py`. The reference docker driver
+`src/blemees_container/engines/<name>.py`. The reference docker driver
 is straight subprocess-of-`docker` calls; `podman` and `nerdctl`
 drivers inherit from it and override only the binary name (and any
 flag differences). The abstraction is deliberately "boring" — every
@@ -1264,7 +1311,7 @@ v0.1 engines support this naturally.
      `meta.json`, `events.jsonl`, `usage.json`, etc.
    Small-to-medium depending on how the daemon currently lays out
    session state.
-3. **Engine driver protocol** in `blemees-container/blemees_container/engines/`
+3. **Engine driver protocol** in `blemees-container/src/blemees_container/engines/`
    per §11 — `ContainerEngine` Protocol, plus the docker
    implementation as the reference. Auto-detection. Mount /
    Env / cp helpers. Small; mostly subprocess wrangling.

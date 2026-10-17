@@ -15,6 +15,9 @@ from collections.abc import Sequence
 
 from blemees_container._version import __version__
 
+# sysexits EX_UNAVAILABLE; distinct from argparse's usage-error code 2.
+EXIT_NOT_IMPLEMENTED = 69
+
 _NOT_YET = (
     "blemees-container {cmd}: not implemented in v{ver}. "
     "Track progress in docs/IMPLEMENTATION_PLAN.md."
@@ -23,7 +26,7 @@ _NOT_YET = (
 
 def _stub(cmd: str) -> int:
     print(_NOT_YET.format(cmd=cmd, ver=__version__), file=sys.stderr)
-    return 2
+    return EXIT_NOT_IMPLEMENTED
 
 
 def _build_parser() -> argparse.ArgumentParser:

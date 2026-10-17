@@ -3,18 +3,18 @@
 Until the actual lifecycle logic lands, these tests just pin down
 the public surface: --version prints the package version, --help
 runs cleanly, every documented subcommand parses, and stubs exit
-non-zero with a recognizable marker.
+with ``EXIT_NOT_IMPLEMENTED`` (69) and a recognizable marker, distinct
+from argparse's usage-error code 2.
 """
 
 from __future__ import annotations
 
-import subprocess
-import sys
+from importlib.metadata import entry_points
 
 import pytest
 
 from blemees_container import __version__
-from blemees_container.cli import main
+from blemees_container.cli import EXIT_NOT_IMPLEMENTED, main
 
 
 def test_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
@@ -65,20 +65,41 @@ def test_subcommand_stub_exits_with_marker(
     argv: list[str], capsys: pytest.CaptureFixture[str]
 ) -> None:
     rc = main(argv)
-    assert rc == 2
+    assert rc == EXIT_NOT_IMPLEMENTED
     err = capsys.readouterr().err
     assert "not implemented" in err
     assert __version__ in err
 
 
-def test_console_script_installed() -> None:
-    """The ``blemees-container`` console script must run end-to-end
-    (entry-point wiring intact)."""
-    res = subprocess.run(
-        [sys.executable, "-m", "blemees_container.cli", "--version"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert res.returncode == 0
-    assert __version__ in res.stdout
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["stop"],
+        ["logs", "x", "--source", "bogus"],
+    ],
+)
+def test_bad_arguments_exit_with_usage_error(
+    argv: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(argv)
+    assert exc.value.code == 2
+    assert "usage:" in capsys.readouterr().err
+
+
+def test_not_implemented_exit_code_is_distinct() -> None:
+    """Must not collide with 0 success, 2 argparse usage error, 75 entrypoint ready-timeout (§9)."""
+    assert EXIT_NOT_IMPLEMENTED not in (0, 2, 75)
+
+
+def test_console_script_installed(capsys: pytest.CaptureFixture[str]) -> None:
+    """The ``blemees-container`` console script from ``[project.scripts]``
+    must resolve to ``cli.main`` and run (entry-point wiring intact)."""
+    (ep,) = entry_points(group="console_scripts", name="blemees-container")
+    assert ep.value == "blemees_container.cli:main"
+    fn = ep.load()
+    assert fn is main
+    with pytest.raises(SystemExit) as exc:
+        fn(["--version"])
+    assert exc.value.code == 0
+    assert __version__ in capsys.readouterr().out
