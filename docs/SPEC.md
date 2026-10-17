@@ -67,11 +67,9 @@ $XDG_RUNTIME_DIR/blemees/
 ├── agentd.sock                  ← host agentd (optional; absent if user runs only containers)
 └── containers/
     ├── <name-1>/
-    │   ├── agentd.sock          ← container <name-1>'s agentd
-    │   └── meta.json            ← metadata written by blemees-container
+    │   └── agentd.sock          ← container <name-1>'s agentd
     └── <name-2>/
-        ├── agentd.sock
-        └── meta.json
+        └── agentd.sock
 ```
 
 Conventions:
@@ -80,9 +78,13 @@ Conventions:
   peer alias. Names are unique within the runtime dir.
 - **`agentd.sock`** lives at a fixed offset within the container's
   runtime subdirectory so the bind-mount target is predictable.
-- **`meta.json`** is written by `blemees-container start` and read by
-  `blemees-container list`, the TUI, and anything else that wants to
-  enumerate environments. Schema in §6.
+- **`meta.json`** is not in the runtime dir. It lives in the state
+  dir, at `$XDG_STATE_HOME/blemees/containers/<name>/meta.json`
+  (§3.7, §6). The runtime subdir is bind-mounted rw into the
+  container (§3.1 mount #1), and the container must not be able to
+  edit its own metadata. It is written by `blemees-container start`
+  and read by `blemees-container list`, the TUI, and anything else
+  that wants to enumerate environments. Schema in §6.
 - **`peerd.sock`** stays at the top level — there is exactly one peer
   mesh per user, regardless of how many agentd environments exist.
 - **`agentd.sock`** at the top level is optional; users who run only
@@ -393,13 +395,16 @@ Lifecycle (timeline for `blemees-container start <name>` with
    - If the PID is dead, the lock is stale (its blemees-container
      died without releasing). Take it over, log a warning naming
      the prior holder, and proceed.
-3. **Pre-start: copy session in.** If `--resume`, copy the host
-   pool directory into the container at the agent's expected path
-   (`<container-home>/.local/state/blemees/sessions/<id>/`).
-4. **Pre-start: copy auth in** per §3.5.
-5. **Start container.** `<engine> run` with the configured mounts
-   (§3.1) and env (§3.2). Pass `BLEMEES_AGENT_SID=<session-id>`
-   so the agentd inside knows the session it's hosting.
+3. **Pre-start: create container.** `<engine> create` (not `run`;
+   §11) with the configured mounts (§3.1) and env (§3.2). Pass
+   `BLEMEES_AGENT_SID=<session-id>` so the agentd inside knows the
+   session it's hosting.
+4. **Pre-start: copy session and auth in.** If `--resume`, copy the
+   host pool directory into the container at the agent's expected
+   path (`<container-home>/.local/state/blemees/sessions/<id>/`).
+   Copy auth in per §3.5.
+5. **Start container.** Drop the ready sentinel (§4.1 step 13), then
+   `<engine> start`.
 6. **Run.** Agent updates session state in its in-container path
    under `$XDG_STATE_HOME/blemees/sessions/<id>/`. The host pool
    is **not** updated during the run; the host's copy on disk
@@ -430,7 +435,7 @@ Lifecycle (timeline for `blemees-container start <name>` with
      create it. It skips capture with a warning naming the leftovers,
      skips steps 9 and 10 (the container now holds the only copy of
      the session), and exits non-zero (§4.2 step 3).
-   - Run `<engine> cp <name>:/root/.local/state/blemees/sessions/<id>/
+   - Run `<engine> cp <name>:<container-home>/.local/state/blemees/sessions/<id>/
      $XDG_STATE_HOME/blemees/sessions/<id>.tmp.<pid>/`, where `<pid>`
      is the `stop` process, then commit it with the rename-aside
      procedure below. The capture *must* run after `wait` returns;
@@ -648,18 +653,14 @@ Behavior:
    the host's auth file, run the access-token-only extractor, run
    the expiry pre-flight (§3.5). Any failure here aborts before
    the engine is invoked.
-9. **Construct `<engine> run --detach`** with mounts, env (including
-   `BLEMEES_AGENT_HOME`, `BLEMEES_AGENT_SID=<session_id>`,
+9. **Construct the `<engine> create` arguments** with mounts, env
+   (including `BLEMEES_AGENT_HOME`, `BLEMEES_AGENT_SID=<session_id>`,
    `XDG_RUNTIME_DIR=/run`), and `--user $(id -u):$(id -g)` unless
    `--as-root`.
-10. **Engine run, *paused*.** We need the container's filesystem
-    available before the agent starts so we can copy-in. There are
-    two engine-driver-specific ways to achieve this — see §11 — but
-    the conceptual sequence is:
-    - Create the container with the engine, but don't let the
-      agent's main process run yet (e.g. `docker create` then
-      `docker cp` then `docker start`, or run with a sleeping
-      entry-point until copy-in completes).
+10. **Create the container** with `<engine> create`. It does not
+    start, so its filesystem is there for copy-in before the agent
+    runs. Create-then-cp-then-start is a hard requirement of the
+    engine driver protocol (§11).
 11. **Copy-in auth** (the access-only blob and any `--auth-file`s)
     to `--container-home`-relative destinations.
 12. **Copy-in session** (if `--resume`) from
@@ -668,9 +669,8 @@ Behavior:
 13. **Start the agent.** Drop the ready sentinel
     `$XDG_RUNTIME_DIR/blemees/containers/<name>/.ready` (seen as
     `/run/blemees/.ready` through mount #1) — only after steps 11
-    and 12 have succeeded, never on a failure path. Then either the
-    engine's `start` if (10) used `create`, or signal the
-    entry-point if (10) used a sleep. The agentd inside binds
+    and 12 have succeeded, never on a failure path. Then
+    `<engine> start`. The agentd inside binds
     `/run/blemees/agentd.sock` and awaits operator connections.
 14. **Confirm the socket appeared.** Poll
     `$XDG_RUNTIME_DIR/blemees/containers/<name>/agentd.sock` until
@@ -1020,6 +1020,10 @@ The TUI computes a `source` for each client at connect time:
 
 - Top-level `agentd.sock` → `AgentdSource(label="local", kind="host", …)`
 - `containers/<name>/agentd.sock` → `AgentdSource(label=<name>, kind="container", meta=<read meta.json>)`
+
+For a container, `meta` is read from the state dir
+(`$XDG_STATE_HOME/blemees/containers/<name>/meta.json`, §3.7), not
+from the runtime dir that discovery scans.
 
 The display label for a session is its source's `.label`; the
 session record carries a stable reference to the source.
