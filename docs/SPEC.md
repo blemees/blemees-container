@@ -591,7 +591,7 @@ Why split runtime vs state:
 ```
 blemees-container start <name> --image <image> [options]
 blemees-container stop <name> [--force]
-blemees-container list
+blemees-container list [--json]
 blemees-container exec <name> [--] <cmd> [args...]
 blemees-container logs <name> [--follow]
 blemees-container rm <name>
@@ -601,7 +601,7 @@ blemees-container rm <name>
 
 ```
 blemees-container start <name>
-    --image <image-ref>
+    --image <image-ref>             (REQUIRED)
     --container-home <path>         (REQUIRED; the image's $HOME, e.g. /root)
     --home <host-path>              (REQUIRED; project dir, host-canonical form)
     [--workdir <container-path>]    (default: same as --container-home)
