@@ -9,8 +9,7 @@ from argparse's usage-error code 2.
 
 from __future__ import annotations
 
-import subprocess
-import sys
+from importlib.metadata import entry_points
 
 import pytest
 
@@ -90,14 +89,14 @@ def test_bad_arguments_exit_with_usage_error(
     assert "usage:" in capsys.readouterr().err
 
 
-def test_console_script_installed() -> None:
-    """The ``blemees-container`` console script must run end-to-end
-    (entry-point wiring intact)."""
-    res = subprocess.run(
-        [sys.executable, "-m", "blemees_container.cli", "--version"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert res.returncode == 0
-    assert __version__ in res.stdout
+def test_console_script_installed(capsys: pytest.CaptureFixture[str]) -> None:
+    """The ``blemees-container`` console script from ``[project.scripts]``
+    must resolve to ``cli.main`` and run (entry-point wiring intact)."""
+    (ep,) = entry_points(group="console_scripts", name="blemees-container")
+    assert ep.value == "blemees_container.cli:main"
+    fn = ep.load()
+    assert fn is main
+    with pytest.raises(SystemExit) as exc:
+        fn(["--version"])
+    assert exc.value.code == 0
+    assert __version__ in capsys.readouterr().out
