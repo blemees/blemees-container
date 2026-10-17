@@ -76,7 +76,9 @@ Spec milestone 3 — the headline cross-environment feature.
   `<id>.tmp.<pid>` → `<id>`, delete `.old.<pid>`). Tests: capture
   over a non-empty pool entry; a crash between the two renames (roll
   forward with `.tmp.<pid>`, roll back without); `start --resume`
-  does not touch the leftovers of a live PID; two concurrent stops.
+  does not touch the leftovers of a live PID; two concurrent stops;
+  a second `stop --rm` while the first holds the lock does not remove
+  the container; `stop` with `<id>/` missing keeps the container.
 
 ## Phase 4 — "Unified TUI"
 
