@@ -150,6 +150,34 @@ is "same-user same-machine"; the two-mount form keeps containers
 from scanning each other through the filesystem even though peer
 addressing already exposes their identities.
 
+#### 3.1.1 Path arguments and engine `--mount` flags
+
+**`HOST:CONTAINER[:ro]` grammar** (`--mount` and `--auth-file`,
+§4.1):
+
+1. If the argument ends with `:ro`, strip it and mark the entry
+   read-only.
+2. Split the rest at the **rightmost** `:`.
+3. `CONTAINER` must be an absolute path and must not contain `:`.
+4. `HOST` must be non-empty and may contain `:`. A relative `HOST`
+   is resolved to an absolute path against the cwd.
+
+Anything else is a usage error: `start` exits non-zero before it
+calls the engine. Example: `/data/a:b:/mnt/x:ro` → host `/data/a:b`,
+container `/mnt/x`, read-only.
+
+**Engine `--mount` flags.** `blemees-container` builds each flag
+itself as `type=bind,source=<abs>,target=<abs>[,readonly]`. A source
+or target path (the mounts above, `--home`, every `--mount`) that
+contains a comma, a double quote, or a control character (newline
+included) is rejected with an error that names the path. There is no
+quoting or escaping: docker parses the flag as CSV, but podman and
+nerdctl do not document the same quoting, so rejection is the one
+rule that is safe on all three engines.
+
+`--auth-file` paths go through `<engine> cp`, not `--mount`, so only
+the grammar rule applies to them.
+
 ### 3.2 Environment
 
 Every blemees-container-launched container receives:
@@ -522,6 +550,10 @@ blemees-container start <name>
     [--as-root]                     (skip --user mapping; image needs it)
     [-- <agent-cmd> ...]            (override the image's entrypoint)
 ```
+
+`--mount` and `--auth-file` values, and every path that becomes an
+engine `--mount` flag (including `--home`), follow the rules in
+§3.1.1.
 
 The CLI always detaches; there is no foreground mode. Lifecycle is
 managed via `start` / `stop` / `logs --follow`.
@@ -1030,6 +1062,7 @@ subprocess management.
 | Container start failed (image not found, mount denied, etc.) | `blemees-container` removes any partial `containers/<name>/` it created, releases any session lock it acquired, and exits non-zero |
 | Container process crashes after start | `agentd.sock` becomes stale; TUI's discovery probes it, gets connection-refused, marks the source as down. `blemees-container list` shows `state: dead`. Best-effort capture: if the container's agentd had time to flush, `blemees-container stop --force` still copies whatever is there to the host pool. Otherwise the resumed session is left in its pre-start state and the resume lock is released |
 | `peerd.sock` mount missing | Container's MCP sidecar emits the existing "peerd unavailable" tool errors per `blemees-peer` SPEC §10. Agentd channel still works |
+| `--mount`/`--auth-file`/`--home` path breaks the rules in §3.1.1 | `start` exits non-zero with a usage error naming the argument; no engine call, no state changes |
 | `--resume <id>` but session not in pool | `blemees-container start` exits non-zero before touching the engine. No partial state |
 | `--resume <id>` but session is locked by a live container | `blemees-container start` checks the lockfile's PID; if alive, exits with `session 'X' is currently checked out by container 'Y' (pid 4711)`. Suggests `blemees-container stop Y` first |
 | `--resume <id>` but session is locked by a dead PID | `blemees-container start` takes over the stale lock, logs a warning naming the prior holder, and proceeds |
