@@ -38,11 +38,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="cmd", metavar="<command>")
 
-    p_start = sub.add_parser("start", help="Start a containerized agentd")
+    p_start = sub.add_parser(
+        "start",
+        help="Start a containerized agentd",
+        epilog="-- <agent-cmd> ...  override the image's entrypoint (after all options)",
+    )
     p_start.add_argument("name", help="Container name (alias-grammar)")
-    p_start.add_argument("--image", help="Container image reference")
-    p_start.add_argument("--container-home", help="Image's $HOME (e.g. /root)")
-    p_start.add_argument("--home", help="Project dir on the host")
+    p_start.add_argument("--image", required=True, help="Container image reference")
+    p_start.add_argument("--container-home", required=True, help="Image's $HOME (e.g. /root)")
+    p_start.add_argument("--home", required=True, help="Project dir on the host")
     p_start.add_argument("--workdir", help="Working directory inside the container")
     p_start.add_argument("--alias", help="Sets BLEMEES_AGENT_ALIAS")
     p_start.add_argument(
@@ -88,6 +92,8 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip --user mapping; image needs it",
     )
+    # Filled from the argv tail after `--` by _parse_args.
+    p_start.set_defaults(agent_cmd=[])
 
     p_stop = sub.add_parser("stop", help="Stop a containerized agentd")
     p_stop.add_argument("name", help="Container name")
@@ -96,7 +102,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_stop.add_argument("--force", action="store_true", help="SIGKILL immediately")
     p_stop.add_argument("--rm", action="store_true", help="Remove after stop")
 
-    sub.add_parser("list", help="List known containers and their sessions")
+    p_list = sub.add_parser("list", help="List known containers and their sessions")
+    p_list.add_argument("--json", action="store_true", help="Dump full meta.json blocks")
 
     p_exec = sub.add_parser("exec", help="Run a command inside a container")
     p_exec.add_argument("name", help="Container name")
@@ -119,9 +126,41 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _split_agent_cmd(argv: list[str]) -> tuple[list[str], list[str] | None]:
+    """Split ``start``'s trailing ``-- <agent-cmd> ...`` off ``argv``.
+
+    Returns ``(head, tail)``. ``tail`` is everything after the first
+    ``--`` that follows the ``start`` token (``[]`` if there is no
+    ``--``), or ``None`` if the command is not ``start``. argparse
+    never sees the ``--`` or the tail, so its ``--`` handling (which
+    differs between Python 3.11, 3.12 and 3.13) does not matter, and
+    a stray positional before ``--`` stays a usage error.
+    """
+    for i, tok in enumerate(argv):
+        if tok == "--":
+            return argv, None
+        if tok.startswith("-"):
+            continue
+        if tok != "start":
+            return argv, None
+        if "--" not in argv[i + 1 :]:
+            return argv, []
+        j = argv.index("--", i + 1)
+        return argv[:j], argv[j + 1 :]
+    return argv, None
+
+
+def _parse_args(parser: argparse.ArgumentParser, argv: Sequence[str] | None) -> argparse.Namespace:
+    head, agent_cmd = _split_agent_cmd(list(sys.argv[1:] if argv is None else argv))
+    args = parser.parse_args(head)
+    if agent_cmd is not None:
+        args.agent_cmd = agent_cmd
+    return args
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    args = _parse_args(parser, argv)
     if args.cmd is None:
         parser.print_help()
         return 0

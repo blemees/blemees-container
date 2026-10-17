@@ -41,7 +41,7 @@ to the host's container runtime.
 ```
 blemees-container start <name> --image <image> [options]
 blemees-container stop <name> [--force]
-blemees-container list
+blemees-container list [--json]
 blemees-container exec <name> [--] <cmd> [args...]
 blemees-container logs <name> [--follow]
 blemees-container rm <name>
