@@ -723,7 +723,8 @@ Lifecycle:
    - On success, commit with the rename-aside procedure (§3.6,
      *Capture commit*).
    - On failure, log the failure, remove `<session_id>.tmp.<pid>/`,
-     leave the host pool entry as-is (pre-start state), proceed.
+     leave the host pool entry as-is (pre-start state), keep the
+     container (step 7 skips `--rm`), proceed.
    - Skip this step, with a warning, if the container's exit code
      is the reference entrypoint's ready-timeout code (75, §9). The
      agentd never ran, so there is no newer state to capture, and
@@ -737,8 +738,9 @@ Lifecycle:
 6. **Mark container stopped** in `meta.json`:
    `state: "stopped"`, `stopped_at: <now>`, `captured_session: <id>`
    (or null if `--no-capture` or `<session_id>/` was missing).
-7. If `--rm` (unless step 3 keeps the container), also remove the
-   engine container and the runtime subdir (state subdir is
+7. If `--rm` (unless step 3 keeps the container: another lock
+   holder, a missing `<session_id>/`, or a failed copy-out), also
+   remove the engine container and the runtime subdir (state subdir is
    preserved unless the user runs `rm` in a separate step — keeps
    logs available for debugging).
 
