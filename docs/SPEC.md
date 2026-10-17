@@ -324,8 +324,7 @@ needs to be known *before* the agent starts (otherwise the agent
 runs without credentials on its first call). Inspecting the
 container after start to discover `$HOME` introduces an ordering
 problem we don't want, so `--container-home <path>` is a required
-argument to `blemees-container start` whenever auth or session
-copy-in is requested. The reference image (§9) sets `$HOME=/root`,
+argument to `blemees-container start` (§4.1). The reference image (§9) sets `$HOME=/root`,
 so most users pass `--container-home /root`; non-standard images
 specify their own value.
 
@@ -829,9 +828,11 @@ Lifecycle:
    failed).
 7. If `--rm` (unless step 3 keeps the container: another lock
    holder, a missing `<session_id>/`, or a failed copy-out), also
-   remove the engine container and the runtime subdir (state subdir is
+   remove the engine container and the runtime subdir, and release
+   the session lock if it still names this container, as `rm` does
+   (§4.6; this covers `--no-capture --rm`). The state subdir is
    preserved unless the user runs `rm` in a separate step — keeps
-   logs available for debugging).
+   logs available for debugging.
 
 The `wait`-then-`cp` sequence in steps 2 and 3 is critical: the
 agent must have fully exited before the cp begins, or we risk a
