@@ -66,7 +66,6 @@ def test_subcommand_stub_exits_with_marker(
 ) -> None:
     rc = main(argv)
     assert rc == EXIT_NOT_IMPLEMENTED
-    assert rc != 2
     err = capsys.readouterr().err
     assert "not implemented" in err
     assert __version__ in err
@@ -85,8 +84,12 @@ def test_bad_arguments_exit_with_usage_error(
     with pytest.raises(SystemExit) as exc:
         main(argv)
     assert exc.value.code == 2
-    assert exc.value.code != EXIT_NOT_IMPLEMENTED
     assert "usage:" in capsys.readouterr().err
+
+
+def test_not_implemented_exit_code_is_distinct() -> None:
+    """Must not collide with 0 success, 2 argparse usage error, 75 entrypoint ready-timeout (§9)."""
+    assert EXIT_NOT_IMPLEMENTED not in (0, 2, 75)
 
 
 def test_console_script_installed(capsys: pytest.CaptureFixture[str]) -> None:
