@@ -38,7 +38,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="cmd", metavar="<command>")
 
-    p_start = sub.add_parser("start", help="Start a containerized agentd")
+    p_start = sub.add_parser(
+        "start",
+        help="Start a containerized agentd",
+        epilog="-- <agent-cmd> ...  override the image's entrypoint (after all options)",
+    )
     p_start.add_argument("name", help="Container name (alias-grammar)")
     p_start.add_argument("--image", required=True, help="Container image reference")
     p_start.add_argument("--container-home", required=True, help="Image's $HOME (e.g. /root)")

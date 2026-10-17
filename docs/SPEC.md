@@ -405,8 +405,13 @@ Lifecycle (timeline for `blemees-container start <name>` with
 3. **Pre-start: create container.** `<engine> create` (not `run`;
    §11) with the configured mounts (§3.1) and env (§3.2). Pass
    `BLEMEES_AGENT_SID=<session-id>` so the agentd inside knows the
-   session it's hosting. Rewrite the lock with the returned
-   `engine_id` (*Lock guard*, below) before any copy-in.
+   session it's hosting. Write the returned `engine_id` to
+   `meta.json` (§6) first, then rewrite the lock with it (*Lock
+   guard*, below), both before any copy-in. Use that order: if
+   `start` dies between the two writes, the lock still has a null
+   `engine_id` and a dead PID, so it is stale (*Lock semantics*).
+   The reverse order would leave a lock that names a container
+   `meta.json` does not know.
 4. **Pre-start: copy session and auth in.** If `--resume`, copy the
    host pool directory into the container at the agent's expected
    path (`<container-home>/.local/state/blemees/sessions/<id>/`).
@@ -434,9 +439,11 @@ Lifecycle (timeline for `blemees-container start <name>` with
      lock is normally dead by now.
    - If the lock names this container but holds a live
      `blemees-container` PID that is not this process (another
-     `stop` capturing), this `stop` does not finish the stop: it
-     skips capture, step 9 and step 10, prints a message naming that
-     PID, and exits non-zero. The holder finishes the stop, including
+     `stop` capturing, or a `start` still in its socket poll, §4.1
+     step 14), this `stop` does not finish the stop: it skips
+     capture, step 9 and step 10, prints a message naming the holder
+     as another `blemees-container` process with that PID, and exits
+     non-zero. The holder finishes the stop, including
      its own `--rm` if it was given. Without `--rm`, run `stop` again
      later: it captures if the holder kept the lock, and skips
      capture (next item) if the holder released it. This serializes
@@ -548,29 +555,47 @@ releases the lock (§4.6). If the engine already removed the
 container, the lock is stale (*Lock semantics*), and the next
 `start --resume` takes it over with a warning; the pool holds the
 last good state. The behavior is opt-out: `blemees-container stop
---no-capture` skips step 8 entirely.
+--no-capture` skips the copy-out but still takes the lock as in
+step 8 and releases it (step 9): the user chose to discard the
+container's session state, so the pool entry is free again.
 
 **Exception: the agentd never ran.** If `<engine> wait` reports
 the reference entrypoint's ready-timeout exit code (75, §9), the
-entrypoint gave up before `exec`ing `blemees-agentd`. Nothing in
-the container is newer than the pool entry, and the in-container
-session path may hold an incomplete copy-in or nothing at all.
+entrypoint gave up before `exec`ing `blemees-agentd`. The same holds
+if the container never started (state `created`, or a zero
+`StartedAt`; *Lock semantics*): `start` died during copy-in, before
+§4.1 step 13. `stop` checks this with `<engine> inspect` before
+step 7, because SIGTERM and `wait` do nothing useful on a container
+that never ran. In both cases nothing in the container is newer
+than the pool entry, and the in-container session path may hold an
+incomplete copy-in or nothing at all.
 blemees-container takes the lock as in step 8 but skips the
 capture, warns, leaves the pool entry untouched, and releases the
 lock (step 9).
 
 **Lock semantics.** The lockfile is the source of truth for "is
 this session currently checked out". The lock protects the session
-while the container exists: the session is checked out from `start`
+while the container exists (once it has started): the session is checked out from `start`
 until `stop` releases the lock or `rm` removes the container
 (§4.6). A lock is **live** if either:
 
 - its `blemees_container_pid` is alive and is a `blemees-container`
   process, or
 - its `engine_id` is not null and `<engine> inspect` of that
-  `engine_id` finds the container in any state (created, running,
+  `engine_id` finds a container that has started (running or
   exited). The check uses the engine ID, not the name, so a new
-  container that reuses the name does not hold the lock.
+  container that reuses the name does not hold the lock. `<engine>`
+  is the lock's `engine` field, not the `--engine` or auto-detected
+  engine of the current command.
+
+A container that **never started** (`<engine> inspect` reports
+state `created`, or a zero `StartedAt`) does not keep the lock live.
+`start` drops the ready sentinel and runs `<engine> start` only
+after copy-in succeeded (§4.1 step 13), so such a container holds at
+most a partial copy-in, never newer session state. This is the case
+where `start` dies during copy-in (§4.1 steps 11-12): its PID is
+dead and the container never started, so the lock is stale and a
+`start --resume` may take it over.
 
 Otherwise the lock is stale. If the engine cannot answer (binary
 missing, daemon down, timeout), the lock counts as live (fail
@@ -581,10 +606,11 @@ stale: its writer died mid-write (a live writer would still hold
 the guard).
 
 So `start` detaching and exiting does not make the lock stale; the
-container still exists. `start` rewrites the lock with the
-`engine_id` right after `create` returns it, before any copy-in
-(step 3). If `start` dies between `create` and that rewrite, the
-lock has a null `engine_id` and a dead PID, so it is stale. A later
+container still exists. `start` writes the `engine_id` to
+`meta.json` and then into the lock right after `create` returns it,
+before any copy-in (step 3). If `start` dies between `create` and
+the lock rewrite, the lock has a null `engine_id` and a dead PID,
+so it is stale. A later
 `stop` of the orphan container sees a lock that does not name it
 and does not capture (step 8).
 
@@ -661,7 +687,7 @@ Why split runtime vs state:
 - The session lock files (`<id>.lock` and `.lock-guard`) in
   `$XDG_STATE_HOME/blemees/sessions/` also persist appropriately —
   they're not orphaned by reboots, and the stale check (dead PID and
-  no engine container) handles abandoned locks (§3.6).
+  no started engine container) handles abandoned locks (§3.6).
 - `<id>.tmp.<pid>/` and `<id>.old.<pid>/` siblings in the session
   pool are transient capture-commit state (§3.6, *Capture commit*),
   not sessions.
@@ -724,7 +750,7 @@ Behavior:
    container has not started yet.
 7. **Write `meta.json`** to the state dir with all fields known so
    far (image, home, container_home, session_id, resumed_session,
-   auth_files, …).
+   auth_files, engine, …). `engine_id` stays null until step 10.
 8. **Pre-flight auth check.** For each `--auth <provider>`, read
    the host's auth file, run the access-token-only extractor, run
    the expiry pre-flight (§3.5). Any failure here aborts before
@@ -736,8 +762,9 @@ Behavior:
 10. **Create the container** with `<engine> create`. It does not
     start, so its filesystem is there for copy-in before the agent
     runs. Create-then-cp-then-start is a hard requirement of the
-    engine driver protocol (§11). Rewrite the session lock with the
-    returned `engine_id` (§3.6 step 3) before any copy-in.
+    engine driver protocol (§11). Write the returned `engine_id` to
+    `meta.json`, then rewrite the session lock with it, in that
+    order and before any copy-in (§3.6 step 3).
 11. **Copy-in auth** (the access-only blob and any `--auth-file`s)
     to `--container-home`-relative destinations.
 12. **Copy-in session** (if `--resume`) from
@@ -782,7 +809,8 @@ Lifecycle:
 2. **`<engine> wait <name>` with `--timeout`.** Block until the
    container exits or the timeout elapses. On timeout, send
    SIGKILL and re-`wait`.
-3. **Capture session state** (unless `--no-capture`):
+3. **Capture session state.** With `--no-capture`, only take the
+   lock as below and skip the copy-out; step 4 releases it.
    - Read the `session_id`, `name` and `engine_id` from `meta.json`.
    - Run recovery, then take the session lock with `stop`'s own PID
      (§3.6 step 8). If the lock names this container but holds
@@ -811,10 +839,13 @@ Lifecycle:
      with `<engine> cp`, then run `blemees-container rm`, which
      releases the lock (§4.6).
    - Skip the copy-out, with a warning, if the container's exit code
-     is the reference entrypoint's ready-timeout code (75, §9); step
-     4 still releases the lock. The agentd never ran, so there is no
-     newer state to capture, and capturing would overwrite the pool
-     entry with an incomplete copy-in or an empty session.
+     is the reference entrypoint's ready-timeout code (75, §9), or if
+     `<engine> inspect` shows the container never started (state
+     `created`, or a zero `StartedAt`; checked before step 1, and
+     steps 1 and 2 are then skipped); step 4 still releases the
+     lock. The agentd never ran, so there is no newer state to
+     capture, and capturing would overwrite the pool entry with an
+     incomplete copy-in or an empty session.
 4. **Release the session lock**: under the lock guard, `os.unlink`
    `<session_id>.lock` in the session pool if it still holds this
    `stop`'s PID (§3.6 step 9). Skipped if step 3 did not take the
@@ -973,6 +1004,11 @@ Field notes:
 
 - `state` ∈ `"running" | "stopped" | "dead"`. Updated by `stop`,
   `list` (when probing finds the engine reports otherwise), and `rm`.
+- `engine` and `engine_id` name the engine container. `engine` is
+  written in §4.1 step 7; `engine_id` is null until `create`
+  returns it and is written in §4.1 step 10, before the session
+  lock is rewritten with it. `stop` and `rm` match the lock against
+  these two fields (§3.6 step 8, §4.6).
 - `container_home` is the value passed via the required
   `--container-home` flag (§3.5).
 - `session_id` is the single session this container hosts (§3.0).
@@ -1253,13 +1289,14 @@ subprocess management.
 | Container process crashes after start | `agentd.sock` becomes stale; TUI's discovery probes it, gets connection-refused, marks the source as down. `blemees-container list` shows `state: dead`. Best-effort capture: if the container's agentd had time to flush, `blemees-container stop --force` still copies whatever is there to the host pool. If the copy-out fails, the pool entry stays at its pre-start state and `stop` keeps the lock and the container (§4.2 step 3). If the engine already removed the container, the lock is stale and the next `start --resume` takes it over |
 | `peerd.sock` mount missing | Container's MCP sidecar emits the existing "peerd unavailable" tool errors per `blemees-peer` SPEC §10. Agentd channel still works |
 | `--resume <id>` but session not in pool | `blemees-container start` exits non-zero before touching the engine. No partial state |
-| `--resume <id>` but session is locked by a live container | `blemees-container start` judges the lock (§3.6 *Lock semantics*): live if its PID is a live `blemees-container` process or its engine container still exists, also after `start` has exited. If live, exits with `session 'X' is currently checked out by container 'Y' (pid 4711)`. Suggests `blemees-container stop Y` first |
-| `--resume <id>` but the lock is stale (dead PID and no engine container) | `blemees-container start` takes over the stale lock, logs a warning naming the prior holder, and proceeds |
+| `--resume <id>` but session is locked by a live container | `blemees-container start` judges the lock (§3.6 *Lock semantics*): live if its PID is a live `blemees-container` process or its engine container has started and still exists, also after `start` has exited. If live, exits with `session 'X' is currently checked out by container 'Y' (pid 4711)`. Suggests `blemees-container stop Y` first, or `blemees-container rm Y` if `Y` is already stopped (a failed copy-out or a missing `<id>/` keeps the lock) |
+| `--resume <id>` but the lock is stale (dead PID and no started engine container) | `blemees-container start` takes over the stale lock, logs a warning naming the prior holder, and proceeds |
 | `--resume <id>` but the engine cannot answer the stale check (binary missing, daemon down, timeout) | The lock counts as live (fail closed). `start` refuses and tells the user to start the engine or, if the container is really gone, to remove `<id>.lock` by hand |
 | Auth copy-in fails (file missing on host) | `blemees-container start` exits non-zero before starting the agent. Container is removed; lock (if any) is released |
 | `--auth <provider>` but host's access token is expired or expires within 5 min | `blemees-container start` refuses with a clear error directing user to re-auth on host. No container is created |
 | Access token expires mid-session inside the container | Agent's API calls start failing. Container's agentd reports the failure on its operator channel. User runs `blemees-container stop` (captures session state) and starts a fresh container if continuing |
 | Ready sentinel not seen within 30s (slow copy-in, or `start` died before dropping it) | Reference entrypoint exits 75 without starting `blemees-agentd` (fail closed, §9). If `start` is still running, its socket poll (§4.1 step 14) fails and it cleans up without capture; the lock is released and the pool entry is untouched. If `start` is gone, a later `stop` sees exit code 75 and skips capture (§4.2 step 3) |
+| `start` died during copy-in (container created, never started) | The lock is stale: dead PID, and a never-started container does not keep it live (§3.6 *Lock semantics*). A `start --resume` takes it over with a warning. A `stop` of that container sees it never started (`<engine> inspect`: state `created` or zero `StartedAt`), skips the copy-out and never commits the partial copy-in; if the lock still names it, `stop` takes and releases it. The pool entry stays at its pre-start state |
 | Session capture (copy-out) fails on stop | `blemees-container stop` warns, removes `<id>.tmp.<pid>/`, leaves the host pool entry as-is (pre-start state), keeps the lock and the container (no `--rm`), marks the container stopped with `captured_session: null`, and exits non-zero. The lock stays live while the container exists. Recovery: run `stop` again to retry (it retakes the lock, which names this container), or copy by hand with `<engine> cp` and then run `blemees-container rm` (which releases the lock). If the engine already removed the container, the lock is stale and the next `start --resume` takes it over with a warning; the pool holds the last good state |
 | Concurrent `blemees-container stop` invocations on the same name | Second sees the engine has already exited and skips to capture / cleanup. The session lock serializes the captures (§3.6 step 8): the second `stop` sees a live holder, skips capture, the `meta.json` write and `--rm`, and exits non-zero naming the holder PID; the first `stop` finishes. Per-PID temp names (`<id>.tmp.<pid>/`, `<id>.old.<pid>/`) are defense in depth: even if two captures ran at once, neither would delete or nest the other's copy; the later swap would win, with the same stopped container's state |
 | UID mismatch — container can't write `/run/blemees/agentd.sock` | Engine emits a permission error; `blemees-container start` surfaces it directly |
@@ -1512,7 +1549,7 @@ v0.1 engines support this naturally.
 7. **`blemees-container` session resume / capture** — `--resume`,
    `--no-capture`, session lockfiles (sibling `<id>.lock`, `O_EXCL`
    create under a `flock` guard, live while the PID or the engine
-   container exists) with stale takeover, sequenced wait+cp.
+   container has started and exists) with stale takeover, sequenced wait+cp.
    Rename-aside capture commit with crash recovery; a failed
    copy-out keeps the lock (§3.6). Medium-large.
 8. **TUI multi-agentd registry** — replace single client with

@@ -109,3 +109,10 @@ def test_list_json_flag(argv: list[str], expected: bool) -> None:
     args = _build_parser().parse_args(argv)
     assert args.cmd == "list"
     assert args.json is expected
+
+
+def test_start_help_shows_agent_cmd(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["start", "--help"])
+    assert exc.value.code == 0
+    assert "-- <agent-cmd>" in capsys.readouterr().out

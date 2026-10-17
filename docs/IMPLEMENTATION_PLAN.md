@@ -72,7 +72,7 @@ Spec milestone 3 — the headline cross-environment feature.
   [SPEC §3.6](SPEC.md#36-session-resume--state-lifecycle): a sibling
   `<id>.lock` (not inside `<id>/`), created with `O_EXCL` under the
   `flock` guard `.lock-guard`, and live while its PID is a live
-  `blemees-container` process or its engine container exists.
+  `blemees-container` process or its engine container has started and still exists.
   Sequenced wait+cp. `stop` takes the session lock with its own PID
   before capture, then the rename-aside capture commit with per-PID
   temp names and crash recovery (`<id>` → `<id>.old.<pid>`,
@@ -85,7 +85,12 @@ Spec milestone 3 — the headline cross-environment feature.
   `.tmp.<pid>`, roll back without); `start --resume` does not touch
   the leftovers of a live PID; two concurrent stops; a second
   `stop --rm` while the first holds the lock does not remove the
-  container; `stop` with `<id>/` missing keeps the container.
+  container; `stop` with `<id>/` missing keeps the container;
+  `start` writes the same `engine_id` to `meta.json` and the lock,
+  and the next `stop` matches it and captures; a container that
+  never started does not keep the lock live, and its `stop` skips
+  the copy-out and releases the lock; `stop --no-capture` releases
+  the lock.
 
 ## Phase 4 — "Unified TUI"
 
