@@ -70,7 +70,15 @@ Spec milestone 3 — the headline cross-environment feature.
 - **Step 7.** `--resume`, `--no-capture`. PID-keyed lockfiles with
   stale-takeover semantics per
   [SPEC §3.6](SPEC.md#36-session-resume--state-lifecycle). Sequenced
-  wait+cp, atomic replace.
+  wait+cp. `stop` takes the session lock with its own PID before
+  capture, then the rename-aside capture commit with per-PID temp
+  names and crash recovery (`<id>` → `<id>.old.<pid>`,
+  `<id>.tmp.<pid>` → `<id>`, delete `.old.<pid>`). Tests: capture
+  over a non-empty pool entry; a crash between the two renames (roll
+  forward with `.tmp.<pid>`, roll back without); `start --resume`
+  does not touch the leftovers of a live PID; two concurrent stops;
+  a second `stop --rm` while the first holds the lock does not remove
+  the container; `stop` with `<id>/` missing keeps the container.
 
 ## Phase 4 — "Unified TUI"
 
