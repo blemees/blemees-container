@@ -3,7 +3,8 @@
 Until the actual lifecycle logic lands, these tests just pin down
 the public surface: --version prints the package version, --help
 runs cleanly, every documented subcommand parses, and stubs exit
-non-zero with a recognizable marker.
+with ``EXIT_NOT_IMPLEMENTED`` (69) and a recognizable marker, distinct
+from argparse's usage-error code 2.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import sys
 import pytest
 
 from blemees_container import __version__
-from blemees_container.cli import main
+from blemees_container.cli import EXIT_NOT_IMPLEMENTED, main
 
 
 def test_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
@@ -65,10 +66,28 @@ def test_subcommand_stub_exits_with_marker(
     argv: list[str], capsys: pytest.CaptureFixture[str]
 ) -> None:
     rc = main(argv)
-    assert rc == 2
+    assert rc == EXIT_NOT_IMPLEMENTED
+    assert rc != 2
     err = capsys.readouterr().err
     assert "not implemented" in err
     assert __version__ in err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["stop"],
+        ["logs", "x", "--source", "bogus"],
+    ],
+)
+def test_bad_arguments_exit_with_usage_error(
+    argv: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(argv)
+    assert exc.value.code == 2
+    assert exc.value.code != EXIT_NOT_IMPLEMENTED
+    assert "usage:" in capsys.readouterr().err
 
 
 def test_console_script_installed() -> None:
