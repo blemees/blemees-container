@@ -374,8 +374,9 @@ Lifecycle (timeline for `blemees-container start <name>` with
 `[--resume <session-id>]`):
 
 1. **Pre-start: resolve session ID.**
-   - With `--resume <id>`: validate
-     `$XDG_STATE_HOME/blemees/sessions/<id>/` exists. Refuse if not.
+   - With `--resume <id>`: run capture-commit recovery (below), then
+     validate `$XDG_STATE_HOME/blemees/sessions/<id>/` exists.
+     Refuse if not.
    - Without `--resume`: mint a fresh `session_id`
      (`sess_` + 16 url-safe base64 chars).
 2. **Pre-start: acquire session lock.** Write
@@ -408,13 +409,61 @@ Lifecycle (timeline for `blemees-container start <name>` with
 8. **Stop: capture session state.** Once `wait` returns (graceful
    exit) — or after a SIGKILL escalation if `wait` times out —
    run `<engine> cp <name>:/root/.local/state/blemees/sessions/<id>/
-   $XDG_STATE_HOME/blemees/sessions/<id>.tmp/`, then atomically
-   `os.replace(<id>.tmp, <id>)`. The capture *must* run after
+   $XDG_STATE_HOME/blemees/sessions/<id>.tmp/`, then commit it with
+   the rename-aside procedure below. The capture *must* run after
    `wait` returns; copying a directory the agentd is still writing
    to risks a torn snapshot.
 9. **Stop: release lock.** `os.unlink(.lock)`.
 10. **Cleanup.** Container engine state is removed by
     `blemees-container rm` (or implicitly by `stop --rm`).
+
+**Capture commit (rename-aside).** POSIX `rename(2)` cannot replace
+a non-empty directory, and the pool entry `<id>/` exists at capture
+time (step 2 creates it to hold the lock, also for a fresh
+session). Paths are relative to `$XDG_STATE_HOME/blemees/sessions/`:
+
+1. Run recovery (below). Remove any leftover `<id>.tmp/`: an
+   `<engine> cp` into an existing directory nests the source inside
+   it.
+2. `<engine> cp` the in-container session directory to `<id>.tmp/`.
+   On failure, remove `<id>.tmp/` and leave `<id>/` untouched (see
+   *Crash semantics*).
+3. Carry the lock over: delete any `.lock` that came out of the
+   container in `<id>.tmp/`, then copy the host's `<id>/.lock` to
+   `<id>.tmp/.lock`. After the swap the lock is still at
+   `<id>/.lock`, so step 9 is unchanged.
+4. Swap: `os.rename(<id>, <id>.old)`, then
+   `os.rename(<id>.tmp, <id>)`, then `shutil.rmtree(<id>.old)`. If
+   `<id>/` does not exist (removed by hand), only do
+   `os.rename(<id>.tmp, <id>)`.
+
+Each rename is atomic. Between the two renames `<id>/` does not
+exist for a moment; a concurrent `start --resume <id>` that sees
+this either rolls forward through recovery (the same result as the
+swap) or fails with "session not in pool" (§8). Both are safe. If
+the second rename finds `<id>.tmp/` gone and `<id>/` present, a
+concurrent recovery already did it, and the swap continues with
+the `rmtree`.
+
+**Recovery.** A crash inside step 4 can leave `<id>/` missing.
+Before any `blemees-container` read or write of pool entry `<id>`
+(`start --resume` step 1, the `stop` capture), if `<id>/` is missing
+and `<id>.old/` exists:
+- If `<id>.tmp/` exists, roll forward:
+  `os.rename(<id>.tmp, <id>)`. `<id>.tmp/` is complete, because
+  step 4 starts only after the copy succeeded.
+- Otherwise roll back: `os.rename(<id>.old, <id>)`.
+
+Then, if `<id>/` exists, delete any leftover `<id>.old/` and
+`<id>.tmp/` — only while holding the session lock (after step 2 on
+`start`; before step 9 on `stop`), so a capture in progress is
+never cut short.
+
+An atomic directory swap (Linux `renameat2(RENAME_EXCHANGE)`, macOS
+`renamex_np(RENAME_SWAP)`) is not in the Python stdlib and differs
+per OS; a versioned directory with a symlink flip changes the pool
+layout that other repos read (§7.1). Rename-aside needs only
+`os.rename`.
 
 **Crash semantics.** If the container crashes (segfault, OOM,
 ungraceful kill) before step 7, the agentd has had no chance to
@@ -490,6 +539,9 @@ Why split runtime vs state:
 - The session lock files in `$XDG_STATE_HOME/blemees/sessions/`
   also persist appropriately — they're not orphaned by reboots
   and a stale-PID check handles abandoned locks (§3.6).
+- `<id>.tmp/` and `<id>.old/` siblings in the session pool are
+  transient capture-commit state (§3.6, *Capture commit*), not
+  sessions.
 
 ## 4. `blemees-container` CLI
 
@@ -533,7 +585,8 @@ Behavior:
 2. **Resolve `--home`** to canonical form via `normalize_path`
    (paths under `~` rewritten, outside stay absolute).
 3. **Resolve session ID:**
-   - With `--resume <id>`: validate the pool entry exists.
+   - With `--resume <id>`: run capture-commit recovery (§3.6), then
+     validate the pool entry exists.
    - Without `--resume`: mint a fresh `session_id`.
 4. **Acquire session lock** per §3.6 step 2 (PID-keyed; takes over
    stale locks).
@@ -611,9 +664,10 @@ Lifecycle:
    - Read the `session_id` from `meta.json`.
    - `<engine> cp <name>:<container-home>/.local/state/blemees/sessions/<session_id>/
      $XDG_STATE_HOME/blemees/sessions/<session_id>.tmp/`
-   - On success, `os.replace(<id>.tmp, <id>)` to commit atomically.
-   - On failure, log the failure, leave the host pool entry as-is
-     (pre-start state), proceed.
+   - On success, commit with the rename-aside procedure (§3.6,
+     *Capture commit*), which also runs recovery first.
+   - On failure, log the failure, remove `<session_id>.tmp/`, leave
+     the host pool entry as-is (pre-start state), proceed.
    - Skip this step, with a warning, if the container's exit code
      is the reference entrypoint's ready-timeout code (75, §9). The
      agentd never ran, so there is no newer state to capture, and
@@ -849,6 +903,11 @@ the agent persists to `/root/.local/state/blemees/sessions/<id>/`
 **`.lock` files** in this directory are for `blemees-container`
 only (per §3.6); the host's blemees-agentd does not touch them.
 
+**`<session-id>.tmp/` and `<session-id>.old/`** siblings in the pool
+are transient state of the `blemees-container` capture commit (§3.6,
+*Capture commit*). Readers of the pool (agentd, TUI) must ignore
+them and must not treat them as sessions.
+
 **Migration:** none — these path/layout changes happen as part of
 the same v0.1 work that introduces blemees-container; existing
 deployments are alpha-stage and have no data to migrate.
@@ -1038,7 +1097,7 @@ subprocess management.
 | Access token expires mid-session inside the container | Agent's API calls start failing. Container's agentd reports the failure on its operator channel. User runs `blemees-container stop` (captures session state) and starts a fresh container if continuing |
 | Ready sentinel not seen within 30s (slow copy-in, or `start` died before dropping it) | Reference entrypoint exits 75 without starting `blemees-agentd` (fail closed, §9). If `start` is still running, its socket poll (§4.1 step 14) fails and it cleans up without capture; the lock is released and the pool entry is untouched. If `start` is gone, a later `stop` sees exit code 75 and skips capture (§4.2 step 3) |
 | Session capture (copy-out) fails on stop | `blemees-container stop` warns, leaves the host pool entry as-is (pre-start state), keeps the lock so a manual `cp` recovery is possible. Operator intervention required |
-| Concurrent `blemees-container stop` invocations on the same name | Second sees the engine has already exited and skips to capture / cleanup. Capture itself is idempotent (atomic replace) |
+| Concurrent `blemees-container stop` invocations on the same name | Second sees the engine has already exited and skips to capture / cleanup. Capture is idempotent: both stops copy the same stopped container's state, and the commit is the rename-aside with recovery (§3.6, *Capture commit*) |
 | UID mismatch — container can't write `/run/blemees/agentd.sock` | Engine emits a permission error; `blemees-container start` surfaces it directly |
 | Two `blemees-container start` invocations with the same `<name>` | Second exits with `name 'X' already in use`; no state changes |
 | Container restarts and re-creates `agentd.sock` | TUI's watcher reconnects; sessions are seen anew. If the container kept its sessions across restart (via agentd's own persistence), they reappear. If not, prior sessions are reported as closed |
@@ -1288,7 +1347,8 @@ v0.1 engines support this naturally.
    checks. Drops the `.ready` sentinel after copy-in. Medium.
 7. **`blemees-container` session resume / capture** — `--resume`,
    `--no-capture`, PID-keyed lockfiles with stale takeover,
-   sequenced wait+cp. Atomic replace. Medium-large.
+   sequenced wait+cp. Rename-aside capture commit with crash
+   recovery (§3.6). Medium-large.
 8. **TUI multi-agentd registry** — replace single client with
    registry per §7.3.1. Tag events with source. Discovery + watch.
    No visible UX change yet (sidebar stays flat). Large.
