@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "blemees-container"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Run blemees-agentd inside a sandboxed container with full operator/peer-mesh participation"
 readme = "README.md"
 license = { text = "MIT" }
@@ -37,6 +37,9 @@ Homepage = "https://github.com/blemees/blemees-container"
 Issues = "https://github.com/blemees/blemees-container/issues"
 Spec = "https://github.com/blemees/blemees-container/blob/main/docs/SPEC.md"
 Plan = "https://github.com/blemees/blemees-container/blob/main/docs/IMPLEMENTATION_PLAN.md"
+
+[tool.hatch.version]
+path = "src/blemees_container/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/blemees_container"]
