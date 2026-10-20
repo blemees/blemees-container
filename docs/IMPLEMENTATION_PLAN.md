@@ -79,7 +79,7 @@ Spec milestone 3 — the headline cross-environment feature.
   `start` after the lock is written, of `stop` and of `rm` to that
   host ([SPEC §11 *Pinning*](SPEC.md#11-engine-driver-protocol));
   `stop` and `rm` refuse if `meta.json` has no `engine_host` or
-  disagrees with the lock ([SPEC §4.2 *Pin*](SPEC.md#42-stop)).
+  disagrees with the lock ([SPEC §4.2 step 0](SPEC.md#42-stop)).
   Sequenced wait+cp. `stop` takes the session lock with its own PID
   before capture, then the rename-aside capture commit with per-PID
   temp names and crash recovery (`<id>` → `<id>.old.<pid>`,
@@ -120,8 +120,15 @@ Spec milestone 3 — the headline cross-environment feature.
   `--rm`) removes the recorded host's container, warns, and releases
   the lock; `rm` after a switch does the same; the lock check's
   `inspect` is pinned; `meta.json` and the lock disagree on
-  `engine_host` → `stop` and `rm` refuse with no engine call;
-  `meta.json` without `engine_host` → they refuse; a pinned docker
+  `engine` or `engine_host` → `stop` and `rm` refuse in step 0 with
+  no engine call and no file change; `meta.json` without
+  `engine_host` → they refuse the same way; a lock that changes to a
+  mismatch between `stop`'s step 0 and step 3 is not taken, and
+  `stop` skips capture and keeps the lock and the container; the
+  same change before `rm`'s second lock check keeps the lock and the
+  state dir; the `stop` SIGTERM/SIGKILL calls are pinned; a pinned
+  podman `--url` call carries `--identity` when `CONTAINER_SSHKEY` is
+  set; a pinned docker
   call has `--host` and no `--context`, and its env has no
   `DOCKER_HOST` or `DOCKER_CONTEXT`; podman uses `--connection` when
   `engine_context` is set, refuses if that connection was removed or
