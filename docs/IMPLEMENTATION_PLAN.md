@@ -76,10 +76,14 @@ Spec milestone 3 — the headline cross-environment feature.
   The lock records `engine_host`; a lock from another engine host is
   held, not stale. `meta.json` records the same `engine_host` and
   `engine_context`. The driver's `pin()` pins every engine call of
-  `start` after the lock is written, of `stop` and of `rm` to that
-  host ([SPEC §11 *Pinning*](SPEC.md#11-engine-driver-protocol));
-  `stop` and `rm` refuse if `meta.json` has no `engine_host` or
-  disagrees with the lock ([SPEC §4.2 step 0](SPEC.md#42-stop)).
+  `start` after the lock is written, of `stop`, `rm`, `exec` and
+  `logs`, and the probe of `list` to that host
+  ([SPEC §11 *Pinning*](SPEC.md#11-engine-driver-protocol));
+  `stop`, `rm`, `exec` and `logs` refuse if `meta.json` has no
+  `engine_host` or disagrees with the lock
+  ([SPEC §4.2 step 0](SPEC.md#42-stop)). `list` writes `state` only
+  from a pinned probe answer when the current endpoint is the
+  recorded host ([SPEC §4.3](SPEC.md#43-list)).
   Sequenced wait+cp. `stop` takes the session lock with its own PID
   before capture, then the rename-aside capture commit with per-PID
   temp names and crash recovery (`<id>` → `<id>.old.<pid>`,
@@ -138,6 +142,35 @@ Spec milestone 3 — the headline cross-environment feature.
   `--namespace` for a `local` address) and has no `CONTAINERD_*`
   vars in the env; a pin that fails after `create` keeps the lock
   and the state dir.
+  `list` / `exec` / `logs` pinning tests (same fake engine):
+  `exec` and `logs --source engine|agentd` after a context switch
+  to a host with a container of the same name run on the recorded
+  host A, not on B's container, and warn; `exec` and `logs` refuse
+  in step 0 with zero engine calls and no file change when
+  `meta.json` has no `engine_host`, when it and the lock disagree,
+  and when the pin cannot be built; `list` after a switch makes no
+  engine call for A's container and writes no `state` into its
+  `meta.json` (no `dead`, not B's state), shows the stored state,
+  warns, and exits zero; `list` with a pin that cannot be built, or
+  a pinned probe that fails, writes no `state` and still lists the
+  other containers; `list` on the recorded host updates `state`
+  through the pinned probe (argv carries the pin and the
+  `engine_id`, not the name); `list` with a null `engine_id` makes
+  no engine call and no warning; a crash (pinned probe answers
+  `exited`, or no such container, while the stored `state` is
+  `running`) writes `dead`; `exited` with a stored `stopped` or
+  `dead` writes nothing; a pinned probe that answers `created` or
+  another value (podman `stopped`, `unknown`, `removing`) writes no
+  `state`; a same-name container on the same
+  host with another engine ID does not change `state`; `list`
+  compares the current endpoint of each `meta.json`'s own `engine`;
+  `logs --source container`, and `logs` without `--follow` on a
+  stopped container with a captured `engine.log` / `agentd.log`,
+  make no engine call and work when the pin cannot be built; `logs
+  --follow --source engine` with a captured file still makes the
+  live pinned call; with no captured file, `logs --source engine`
+  makes the live pinned call; step 0 warnings and refusals go to
+  stderr and stdout holds only the command output or log text.
 
 ## Phase 4 — "Unified TUI"
 
