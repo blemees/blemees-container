@@ -100,7 +100,10 @@ Spec milestone 3 — the headline cross-environment feature.
   `endpoint()` precedence (`DOCKER_HOST` over the context;
   `CONTAINER_CONNECTION` over `CONTAINER_HOST` over the default
   connection); podman on Linux with a default connection but remote
-  mode off gives `local`; the nerdctl endpoint includes the
+  mode off gives `local`; podman in remote mode with no default
+  connection gives its default API socket; an `engine.remote` set in
+  a later containers.conf layer wins, and an unreadable layer makes
+  `endpoint()` fail; the nerdctl endpoint includes the
   namespace and takes `address` / `namespace` from `nerdctl.toml`
   when the env is unset (the env wins over the toml).
 

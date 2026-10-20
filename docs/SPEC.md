@@ -1550,15 +1550,25 @@ order:
   in `podman system connection list` (`engine_context` is its name);
   else `$CONTAINER_HOST` if set (`engine_context` null); else, in
   remote mode only, the URI of the default connection
-  (`engine_context` is its name); else, outside remote mode, the
-  literal `local` for the local socket. In remote mode with no
-  default connection podman itself fails, so `endpoint()` fails too
-  and the lock counts as live (§3.6 *Lock semantics*). Podman is in remote mode always on macOS and
+  (`engine_context` is its name); else, in remote mode with no
+  default connection, podman's default API socket,
+  `unix://$XDG_RUNTIME_DIR/podman/podman.sock` (rootless) or
+  `unix:///run/podman/podman.sock` (rootful) (`engine_context`
+  null); else, outside remote mode, the literal `local` for the
+  local socket. Podman is in remote mode always on macOS and
   Windows; on Linux only if `CONTAINER_HOST` or
   `CONTAINER_CONNECTION` is set or `containers.conf` has
-  `engine.remote = true`. `blemees-container` never passes
-  `--remote`, `--connection` or `--url`, so only the env and
-  `containers.conf` matter.
+  `engine.remote = true`. Read `engine.remote` by merging the
+  containers.conf layers in podman's order
+  (`/usr/share/containers/containers.conf`,
+  `/etc/containers/containers.conf`,
+  `~/.config/containers/containers.conf`, each with its
+  `containers.conf.d/` drop-ins; `CONTAINERS_CONF` replaces them,
+  `CONTAINERS_CONF_OVERRIDE` goes last). If the value cannot be
+  decided (a layer cannot be read or parsed), `endpoint()` fails
+  and the lock counts as live (§3.6 *Lock semantics*).
+  `blemees-container` never passes `--remote`, `--connection` or
+  `--url`, so only the env and `containers.conf` matter.
 - nerdctl: `<address>#<namespace>`. Each part comes from the env,
   else `nerdctl.toml`, else a default: `$CONTAINERD_ADDRESS`, else
   the `address` key, else `local`; `$CONTAINERD_NAMESPACE`, else the
