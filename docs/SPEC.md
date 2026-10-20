@@ -885,6 +885,11 @@ Lifecycle:
      on the recorded host, not on the current endpoint, so a context
      switch after `start` cannot point `stop` at another daemon's
      container with the same name.
+   - The warning below and the refusal messages above go to stderr.
+     Stdout keeps only the command's own output (for `exec` the
+     command's output, for `logs` the log text), so a redirect such
+     as `exec Y cat f > out` or `logs Y > engine.txt` gets no
+     warning line.
    - If the current endpoint is not the recorded `engine_host`, warn
      `container 'Y' is on engine host 'H' (context 'C'), not on the
      current endpoint 'H2'` (without ` (context 'C')` if
@@ -985,8 +990,12 @@ only through the pin of that container's `meta.json` (§11
 *Pinning*). It never asks the current endpoint about the name. For
 each container:
 
+- If `engine_id` is null (`start` has not yet reached `create`,
+  §4.1 steps 7-10), `list` makes no engine call for that container,
+  shows the stored `state` and gives no warning.
 - If `meta.json` has no `engine_host`, the pin cannot be built,
-  `endpoint()` fails, or the current endpoint is not the recorded
+  `endpoint()` of the `meta.json` `engine` fails (also when that
+  engine's binary is missing), or that endpoint is not the recorded
   `engine_host`, `list` makes no engine call for that container. It
   shows the `state` stored in `meta.json` and warns on stderr
   `container 'Y' not probed: <reason>; state is from meta.json`,
@@ -994,11 +1003,15 @@ each container:
   refusal (§11), the `endpoint()` error, or `it is on engine host
   'H' (context 'C'), not on the current endpoint 'H2'` (without
   ` (context 'C')` if `engine_context` is null).
-- Else it runs the pinned `<engine> inspect`. Only an answer from
-  the recorded host (the container's state, or no such container)
-  can change `state`. If the probe fails (engine not available,
-  timeout, any other error), `list` shows the stored state with the
-  same warning and writes nothing.
+- Else it runs the pinned `<engine> inspect <engine_id>`, by
+  engine ID and not by name, so a container that reuses the name on
+  the same host is not probed (as in the §3.6 lock check). Only an
+  answer from the recorded host can change `state`: `running` (or
+  `paused`, `restarting`) gives `running`; `exited` gives `stopped`;
+  `dead`, or no such container, gives `dead`; `created` (§4.1 steps
+  10-13, not started yet) changes nothing. If the probe fails
+  (engine not available, timeout, any other error), `list` shows
+  the stored state with the same warning and writes nothing.
 
 `list` writes `state` into `meta.json` only from such an answer,
 so a failed or skipped probe never writes `dead`, and the state of
@@ -1056,6 +1069,20 @@ call then uses the pin, so it reads the recorded host's container.
 Reading a file under `$XDG_STATE_HOME/blemees/containers/<name>/logs/`
 (`container`, and the captured `engine.log` and `agentd.log`) makes
 no engine call, so it skips step 0 and needs no pin.
+
+Which path `engine` and `agentd` take:
+
+- Without `--follow`, they read the captured file
+  (`logs/engine.log` or `logs/agentd.log`) if it exists, and make
+  no engine call. `stop` writes these files in §4.2 step 5, and a
+  name is not reused while its state subdir exists (§4.1 step 1), so
+  the file is always from this container's last run. Captured logs
+  therefore stay readable after the engine host is gone or the pin
+  fails.
+- Else (no captured file, or `--follow`), they make the live pinned
+  call above, after step 0.
+- `container` always reads its file; `--follow` on it tails the
+  file and makes no engine call.
 
 ### 4.6 `rm`
 

@@ -154,9 +154,19 @@ Spec milestone 3 — the headline cross-environment feature.
   warns, and exits zero; `list` with a pin that cannot be built, or
   a pinned probe that fails, writes no `state` and still lists the
   other containers; `list` on the recorded host updates `state`
-  through the pinned probe (argv carries the pin); `logs --source
-  container` and the captured `engine.log` / `agentd.log` make no
-  engine call and work when the pin cannot be built.
+  through the pinned probe (argv carries the pin and the
+  `engine_id`, not the name); `list` with a null `engine_id` makes
+  no engine call and no warning; a pinned probe that answers
+  `created` writes no `state`; a same-name container on the same
+  host with another engine ID does not change `state`; `list`
+  compares the current endpoint of each `meta.json`'s own `engine`;
+  `logs --source container`, and `logs` without `--follow` on a
+  stopped container with a captured `engine.log` / `agentd.log`,
+  make no engine call and work when the pin cannot be built; `logs
+  --follow --source engine` with a captured file still makes the
+  live pinned call; with no captured file, `logs --source engine`
+  makes the live pinned call; step 0 warnings and refusals go to
+  stderr and stdout holds only the command output or log text.
 
 ## Phase 4 — "Unified TUI"
 
