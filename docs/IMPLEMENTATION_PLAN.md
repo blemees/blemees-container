@@ -73,6 +73,8 @@ Spec milestone 3 — the headline cross-environment feature.
   `<id>.lock` (not inside `<id>/`), created with `O_EXCL` under the
   `flock` guard `.lock-guard`, and live while its PID is a live
   `blemees-container` process or its engine container has started and still exists.
+  The lock records `engine_host`; a lock from another engine host is
+  held, not stale.
   Sequenced wait+cp. `stop` takes the session lock with its own PID
   before capture, then the rename-aside capture commit with per-PID
   temp names and crash recovery (`<id>` → `<id>.old.<pid>`,
@@ -90,7 +92,20 @@ Spec milestone 3 — the headline cross-environment feature.
   and the next `stop` matches it and captures; a container that
   never started does not keep the lock live, and its `stop` skips
   the copy-out and releases the lock; `stop --no-capture` releases
-  the lock.
+  the lock; a lock with another `engine_host` and a dead PID is held
+  (`start --resume` refuses, the engine is not queried); a lock with
+  the same `engine_host`, a dead PID and the container gone is stale
+  and taken over; a valid lock with no `engine_host` is held; an
+  `endpoint()` that fails or times out makes the lock live;
+  `endpoint()` precedence (`DOCKER_HOST` over the context;
+  `CONTAINER_CONNECTION` over `CONTAINER_HOST` over the default
+  connection); podman on Linux with a default connection but remote
+  mode off gives `local`; podman in remote mode with no default
+  connection gives its default API socket; an `engine.remote` set in
+  a later containers.conf layer wins, and an unreadable layer makes
+  `endpoint()` fail; the nerdctl endpoint includes the
+  namespace and takes `address` / `namespace` from `nerdctl.toml`
+  when the env is unset (the env wins over the toml).
 
 ## Phase 4 — "Unified TUI"
 

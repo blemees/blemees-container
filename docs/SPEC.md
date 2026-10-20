@@ -387,15 +387,22 @@ Lifecycle (timeline for `blemees-container start <name>` with
    `<id>/`, so it is never copied into or out of a container. It
    holds JSON:
    ```json
-   {"container_name": "<name>", "engine": "docker", "engine_id": null, "blemees_container_pid": 4711, "acquired_at": 1714512345.6}
+   {"container_name": "<name>", "engine": "docker", "engine_host": "unix:///var/run/docker.sock", "engine_context": "default", "engine_id": null, "blemees_container_pid": 4711, "acquired_at": 1714512345.6}
    ```
-   `engine_id` is null until `create` returns it (step 3). Acquire
+   `engine_id` is null until `create` returns it (step 3).
+   `engine_host` is the daemon endpoint that `engine_id` belongs to,
+   and `engine_context` is the name of the context or connection, or
+   null (§11 *Endpoint*). `start` resolves both before it writes the
+   lock, so they are in the `O_EXCL` write. Locks are compared by
+   `engine_host` only, as exact strings (§11 *Endpoint*);
+   `engine_context` is for messages. Acquire
    it under the lock guard (*Lock guard*, below):
    - `os.open(<id>.lock, O_WRONLY|O_CREAT|O_EXCL, 0o600)`, write the
      JSON, fsync the file and the sessions directory.
    - On `EEXIST`, read the lock and judge it (*Lock semantics*,
      below). If it is live, refuse with `session 'X' is currently
-     checked out by container 'Y' (pid 4711)`.
+     checked out by container 'Y' (pid 4711)`. A lock from another
+     engine host has its own message (*Lock semantics*).
    - If it is stale, log a warning naming the prior holder,
      `os.unlink` it, and retry the `O_EXCL` create once. Under the
      guard the retry succeeds; if it gets `EEXIST` anyway, fail.
@@ -435,7 +442,7 @@ Lifecycle (timeline for `blemees-container start <name>` with
      names no container). If it names this
      container and its PID is not another live `blemees-container`
      process, rewrite it with `stop`'s PID and the same container
-     fields. `start` detaches and exits (§4.1), so its PID in the
+     and engine fields. `start` detaches and exits (§4.1), so its PID in the
      lock is normally dead by now.
    - If the lock names this container but holds a live
      `blemees-container` PID that is not this process (another
@@ -577,10 +584,23 @@ lock (step 9).
 this session currently checked out". The lock protects the session
 while the container exists (once it has started): the session is checked out from `start`
 until `stop` releases the lock or `rm` removes the container
-(§4.6). A lock is **live** if either:
+(§4.6). A lock is **live** if one of these holds, checked in this
+order:
 
 - its `blemees_container_pid` is alive and is a `blemees-container`
   process, or
+- its `engine_host` is not the current endpoint of the lock's
+  `engine` (§11 *Endpoint*): the engine context or `DOCKER_HOST` /
+  `CONTAINER_HOST` / `CONTAINER_CONNECTION` changed since the lock was taken. The engine is
+  not queried, because "no such container" from another daemon says
+  nothing about the lock's container. The lock is held (fail
+  closed). `start --resume` refuses with `session 'X' is checked
+  out on engine host 'H' (context 'C')`, from the lock's
+  `engine_host` and `engine_context` (without ` (context 'C')` if
+  `engine_context` is null), and tells the user to switch
+  back to that context (or set `DOCKER_HOST` / `CONTAINER_HOST` / `CONTAINER_CONNECTION`)
+  and run `stop` or `rm` there, or, if that host is gone for good,
+  to remove `<id>.lock` by hand, or
 - its `engine_id` is not null and `<engine> inspect` of that
   `engine_id` finds a container that has started (running or
   exited). The check uses the engine ID, not the name, so a new
@@ -603,7 +623,13 @@ closed). The message then tells the user to start the engine or, if
 the container is really gone, to remove `<id>.lock` by hand. A lock
 file that is empty or not valid JSON, seen under the guard, is
 stale: its writer died mid-write (a live writer would still hold
-the guard).
+the guard). A lock that is valid JSON but has no `engine_host` is
+not a torn write (every lock is written with it), so it counts as
+held from another engine host, not as stale: `start --resume`
+refuses with `session 'X' is checked out on an unknown engine host
+(lock has no engine_host)` and the same recovery hint. If the current
+endpoint cannot be resolved (`endpoint()` fails or times out), the
+lock counts as live, as when the engine cannot answer.
 
 So `start` detaching and exiting does not make the lock stale; the
 container still exists. `start` writes the `engine_id` to
@@ -629,8 +655,9 @@ Unlink-then-retry alone is not enough: two takers can each judge the
 same stale lock, and the second unlinks the first's fresh lock.
 Under the guard, check and takeover are one step. The guard is held
 only for the lock operation, never across engine `create`, `cp` or
-`wait`. The one engine call made under the guard is the stale
-check's `<engine> inspect`, which has a timeout.
+`wait`. The engine calls made under the guard are the stale
+check's endpoint resolution (§11 *Endpoint*) and `<engine>
+inspect`, each with a timeout.
 
 - **Rewrite** (`start` adds `engine_id`; `stop` puts its own PID):
   write `<id>.lock.tmp.<pid>`, fsync it, and `os.rename` it over
@@ -687,7 +714,8 @@ Why split runtime vs state:
 - The session lock files (`<id>.lock` and `.lock-guard`) in
   `$XDG_STATE_HOME/blemees/sessions/` also persist appropriately —
   they're not orphaned by reboots, and the stale check (dead PID and
-  no started engine container) handles abandoned locks (§3.6).
+  no started engine container on the same engine host) handles
+  abandoned locks (§3.6).
 - `<id>.tmp.<pid>/` and `<id>.old.<pid>/` siblings in the session
   pool are transient capture-commit state (§3.6, *Capture commit*),
   not sessions.
@@ -1290,8 +1318,9 @@ subprocess management.
 | `peerd.sock` mount missing | Container's MCP sidecar emits the existing "peerd unavailable" tool errors per `blemees-peer` SPEC §10. Agentd channel still works |
 | `--resume <id>` but session not in pool | `blemees-container start` exits non-zero before touching the engine. No partial state |
 | `--resume <id>` but session is locked by a live container | `blemees-container start` judges the lock (§3.6 *Lock semantics*): live if its PID is a live `blemees-container` process or its engine container has started and still exists, also after `start` has exited. If live, exits with `session 'X' is currently checked out by container 'Y' (pid 4711)`. Suggests `blemees-container stop Y` first, or `blemees-container rm Y` if `Y` is already stopped (a failed copy-out or a missing `<id>/` keeps the lock) |
-| `--resume <id>` but the lock is stale (dead PID and no started engine container) | `blemees-container start` takes over the stale lock, logs a warning naming the prior holder, and proceeds |
+| `--resume <id>` but the lock is stale (dead PID, same engine host, and no started engine container) | `blemees-container start` takes over the stale lock, logs a warning naming the prior holder, and proceeds |
 | `--resume <id>` but the engine cannot answer the stale check (binary missing, daemon down, timeout) | The lock counts as live (fail closed). `start` refuses and tells the user to start the engine or, if the container is really gone, to remove `<id>.lock` by hand |
+| Engine context / `DOCKER_HOST` switched while a session is checked out | The lock's `engine_host` is not the current endpoint, so the lock counts as held, even with a dead PID; the engine is not queried (§3.6 *Lock semantics*). `start --resume` refuses with `session 'X' is checked out on engine host 'H' (context 'C')` (without ` (context 'C')` if `engine_context` is null; a valid lock with no `engine_host` gives `session 'X' is checked out on an unknown engine host (lock has no engine_host)`) and tells the user to switch back to that context (or set `DOCKER_HOST` / `CONTAINER_HOST` / `CONTAINER_CONNECTION`) and run `stop` or `rm` there, or to remove `<id>.lock` by hand if that host is gone for good |
 | Auth copy-in fails (file missing on host) | `blemees-container start` exits non-zero before starting the agent. Container is removed; lock (if any) is released |
 | `--auth <provider>` but host's access token is expired or expires within 5 min | `blemees-container start` refuses with a clear error directing user to re-auth on host. No container is created |
 | Access token expires mid-session inside the container | Agent's API calls start failing. Container's agentd reports the failure on its operator channel. User runs `blemees-container stop` (captures session state) and starts a fresh container if continuing |
@@ -1419,6 +1448,11 @@ class ContainerEngine(Protocol):
         """True if the engine binary is on PATH and the daemon is reachable.
         Checked at start; informs --engine auto-detection."""
 
+    def endpoint(self) -> tuple[str, str | None]:
+        """Resolve (engine_host, engine_context) for the daemon this
+        driver talks to now. Does not contact the daemon. Recorded in
+        and checked against the session lock (§3.6)."""
+
     def create(
         self,
         container_name: str,
@@ -1501,6 +1535,56 @@ order: `docker`, `podman`, `nerdctl`. First one whose
 gets surfaced as a warning so users know they're inheriting an
 implicit choice.
 
+**Endpoint.** `endpoint()` resolves the daemon the engine binary
+talks to now. It follows the engine CLI's own resolution order; if
+it does not, a switch can return the same string for a different
+daemon, and that daemon's "no such container" makes a live lock
+look stale, which is the error the lock check guards against. The
+order:
+
+- docker: `$DOCKER_HOST` if set (`engine_context` null); else the
+  endpoint of the active context, `docker context inspect --format
+  '{{.Endpoints.docker.Host}}'`, which honours `DOCKER_CONTEXT`
+  (`engine_context` from `docker context show`).
+- podman: `$CONTAINER_CONNECTION` if set, the URI of that connection
+  in `podman system connection list` (`engine_context` is its name);
+  else `$CONTAINER_HOST` if set (`engine_context` null); else, in
+  remote mode only, the URI of the default connection
+  (`engine_context` is its name); else, in remote mode with no
+  default connection, podman's default API socket,
+  `unix://$XDG_RUNTIME_DIR/podman/podman.sock` (rootless) or
+  `unix:///run/podman/podman.sock` (rootful) (`engine_context`
+  null); else, outside remote mode, the literal `local` for the
+  local socket. Podman is in remote mode always on macOS and
+  Windows; on Linux only if `CONTAINER_HOST` or
+  `CONTAINER_CONNECTION` is set or `containers.conf` has
+  `engine.remote = true`. Read `engine.remote` by merging the
+  containers.conf layers in podman's order
+  (`/usr/share/containers/containers.conf`,
+  `/etc/containers/containers.conf`,
+  `~/.config/containers/containers.conf`, each with its
+  `containers.conf.d/` drop-ins; `CONTAINERS_CONF` replaces them,
+  `CONTAINERS_CONF_OVERRIDE` goes last). If the value cannot be
+  decided (a layer cannot be read or parsed), `endpoint()` fails
+  and the lock counts as live (§3.6 *Lock semantics*).
+  `blemees-container` never passes `--remote`, `--connection` or
+  `--url`, so only the env and `containers.conf` matter.
+- nerdctl: `<address>#<namespace>`. Each part comes from the env,
+  else `nerdctl.toml`, else a default: `$CONTAINERD_ADDRESS`, else
+  the `address` key, else `local`; `$CONTAINERD_NAMESPACE`, else the
+  `namespace` key, else `default`. The toml is `$NERDCTL_TOML`, else
+  `/etc/nerdctl/nerdctl.toml` (rootful) or
+  `~/.config/nerdctl/nerdctl.toml` (rootless). An ID from another
+  namespace is "not found" too (`engine_context` null).
+
+The session lock compares `engine_host`, not the context name: two
+names can point at one host, and one name can be redefined. The
+compare is exact string equality, with no normalization: two strings
+for one daemon (`tcp://localhost:2375` and `tcp://127.0.0.1:2375`, a
+trailing slash, two docker contexts that reach one socket) count as
+different hosts. That fails closed (held), so it is safe; do not
+normalize.
+
 **The "create-then-cp-then-start" sequence is a hard requirement
 of the protocol.** Drivers that can't separate `create` from
 `start` can't be supported without more elaborate pre-staging
@@ -1549,7 +1633,8 @@ v0.1 engines support this naturally.
 7. **`blemees-container` session resume / capture** — `--resume`,
    `--no-capture`, session lockfiles (sibling `<id>.lock`, `O_EXCL`
    create under a `flock` guard, live while the PID or the engine
-   container has started and exists) with stale takeover, sequenced wait+cp.
+   container has started and exists; held if taken on another
+   engine host) with stale takeover, sequenced wait+cp.
    Rename-aside capture commit with crash recovery; a failed
    copy-out keeps the lock (§3.6). Medium-large.
 8. **TUI multi-agentd registry** — replace single client with
