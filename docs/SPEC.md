@@ -1542,8 +1542,9 @@ talks to now, in this order:
   URI of the active connection, `CONTAINER_CONNECTION` or the default
   in `podman system connection list` (`engine_context` is its name);
   else the literal `local` for the local socket.
-- nerdctl: `$CONTAINERD_ADDRESS` if set, else `local`
-  (`engine_context` null).
+- nerdctl: `<address>#<namespace>`, from `$CONTAINERD_ADDRESS` (else
+  `local`) and `$CONTAINERD_NAMESPACE` (else `default`); an ID from
+  another namespace is "not found" too (`engine_context` null).
 
 The session lock compares `engine_host`, not the context name: two
 names can point at one host, and one name can be redefined.
