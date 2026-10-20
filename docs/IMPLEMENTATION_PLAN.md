@@ -95,8 +95,14 @@ Spec milestone 3 — the headline cross-environment feature.
   the lock; a lock with another `engine_host` and a dead PID is held
   (`start --resume` refuses, the engine is not queried); a lock with
   the same `engine_host`, a dead PID and the container gone is stale
-  and taken over; `endpoint()` precedence (`DOCKER_HOST` over the
-  context, `CONTAINER_HOST` over the connection).
+  and taken over; a valid lock with no `engine_host` is held; an
+  `endpoint()` that fails or times out makes the lock live;
+  `endpoint()` precedence (`DOCKER_HOST` over the context;
+  `CONTAINER_CONNECTION` over `CONTAINER_HOST` over the default
+  connection); podman on Linux with a default connection but remote
+  mode off gives `local`; the nerdctl endpoint includes the
+  namespace and takes `address` / `namespace` from `nerdctl.toml`
+  when the env is unset (the env wins over the toml).
 
 ## Phase 4 — "Unified TUI"
 

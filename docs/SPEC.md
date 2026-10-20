@@ -394,7 +394,8 @@ Lifecycle (timeline for `blemees-container start <name>` with
    and `engine_context` is the name of the context or connection, or
    null (§11 *Endpoint*). `start` resolves both before it writes the
    lock, so they are in the `O_EXCL` write. Locks are compared by
-   `engine_host` only; `engine_context` is for messages. Acquire
+   `engine_host` only, as exact strings (§11 *Endpoint*);
+   `engine_context` is for messages. Acquire
    it under the lock guard (*Lock guard*, below):
    - `os.open(<id>.lock, O_WRONLY|O_CREAT|O_EXCL, 0o600)`, write the
      JSON, fsync the file and the sessions directory.
@@ -595,7 +596,8 @@ order:
   nothing about the lock's container. The lock is held (fail
   closed). `start --resume` refuses with `session 'X' is checked
   out on engine host 'H' (context 'C')`, from the lock's
-  `engine_host` and `engine_context`, and tells the user to switch
+  `engine_host` and `engine_context` (without ` (context 'C')` if
+  `engine_context` is null), and tells the user to switch
   back to that context (or set `DOCKER_HOST` / `CONTAINER_HOST`)
   and run `stop` or `rm` there, or, if that host is gone for good,
   to remove `<id>.lock` by hand, or
@@ -623,9 +625,11 @@ file that is empty or not valid JSON, seen under the guard, is
 stale: its writer died mid-write (a live writer would still hold
 the guard). A lock that is valid JSON but has no `engine_host` is
 not a torn write (every lock is written with it), so it counts as
-held from another engine host, not as stale. If the current
-endpoint cannot be resolved, the lock counts as live, as when the
-engine cannot answer.
+held from another engine host, not as stale: `start --resume`
+refuses with `session 'X' is checked out on an unknown engine host
+(lock has no engine_host)` and the same recovery hint. If the current
+endpoint cannot be resolved (`endpoint()` fails or times out), the
+lock counts as live, as when the engine cannot answer.
 
 So `start` detaching and exiting does not make the lock stale; the
 container still exists. `start` writes the `engine_id` to
@@ -1316,7 +1320,7 @@ subprocess management.
 | `--resume <id>` but session is locked by a live container | `blemees-container start` judges the lock (§3.6 *Lock semantics*): live if its PID is a live `blemees-container` process or its engine container has started and still exists, also after `start` has exited. If live, exits with `session 'X' is currently checked out by container 'Y' (pid 4711)`. Suggests `blemees-container stop Y` first, or `blemees-container rm Y` if `Y` is already stopped (a failed copy-out or a missing `<id>/` keeps the lock) |
 | `--resume <id>` but the lock is stale (dead PID, same engine host, and no started engine container) | `blemees-container start` takes over the stale lock, logs a warning naming the prior holder, and proceeds |
 | `--resume <id>` but the engine cannot answer the stale check (binary missing, daemon down, timeout) | The lock counts as live (fail closed). `start` refuses and tells the user to start the engine or, if the container is really gone, to remove `<id>.lock` by hand |
-| Engine context / `DOCKER_HOST` switched while a session is checked out | The lock's `engine_host` is not the current endpoint, so the lock counts as held, even with a dead PID; the engine is not queried (§3.6 *Lock semantics*). `start --resume` refuses with `session 'X' is checked out on engine host 'H' (context 'C')` and tells the user to switch back to that context (or set `DOCKER_HOST` / `CONTAINER_HOST`) and run `stop` or `rm` there, or to remove `<id>.lock` by hand if that host is gone for good |
+| Engine context / `DOCKER_HOST` switched while a session is checked out | The lock's `engine_host` is not the current endpoint, so the lock counts as held, even with a dead PID; the engine is not queried (§3.6 *Lock semantics*). `start --resume` refuses with `session 'X' is checked out on engine host 'H' (context 'C')` (without ` (context 'C')` if `engine_context` is null; a valid lock with no `engine_host` gives `session 'X' is checked out on an unknown engine host (lock has no engine_host)`) and tells the user to switch back to that context (or set `DOCKER_HOST` / `CONTAINER_HOST`) and run `stop` or `rm` there, or to remove `<id>.lock` by hand if that host is gone for good |
 | Auth copy-in fails (file missing on host) | `blemees-container start` exits non-zero before starting the agent. Container is removed; lock (if any) is released |
 | `--auth <provider>` but host's access token is expired or expires within 5 min | `blemees-container start` refuses with a clear error directing user to re-auth on host. No container is created |
 | Access token expires mid-session inside the container | Agent's API calls start failing. Container's agentd reports the failure on its operator channel. User runs `blemees-container stop` (captures session state) and starts a fresh container if continuing |
@@ -1532,22 +1536,42 @@ gets surfaced as a warning so users know they're inheriting an
 implicit choice.
 
 **Endpoint.** `endpoint()` resolves the daemon the engine binary
-talks to now, in this order:
+talks to now. It follows the engine CLI's own resolution order; if
+it does not, a switch can return the same string for a different
+daemon, and that daemon's "no such container" makes a live lock
+look stale, which is the error the lock check guards against. The
+order:
 
 - docker: `$DOCKER_HOST` if set (`engine_context` null); else the
   endpoint of the active context, `docker context inspect --format
   '{{.Endpoints.docker.Host}}'`, which honours `DOCKER_CONTEXT`
   (`engine_context` from `docker context show`).
-- podman: `$CONTAINER_HOST` if set (`engine_context` null); else the
-  URI of the active connection, `CONTAINER_CONNECTION` or the default
+- podman: `$CONTAINER_CONNECTION` if set, the URI of that connection
   in `podman system connection list` (`engine_context` is its name);
-  else the literal `local` for the local socket.
-- nerdctl: `<address>#<namespace>`, from `$CONTAINERD_ADDRESS` (else
-  `local`) and `$CONTAINERD_NAMESPACE` (else `default`); an ID from
-  another namespace is "not found" too (`engine_context` null).
+  else `$CONTAINER_HOST` if set (`engine_context` null); else, in
+  remote mode only, the URI of the default connection
+  (`engine_context` is its name); else the literal `local` for the
+  local socket. Podman is in remote mode always on macOS and
+  Windows; on Linux only if `CONTAINER_HOST` or
+  `CONTAINER_CONNECTION` is set or `containers.conf` has
+  `engine.remote = true`. `blemees-container` never passes
+  `--remote`, `--connection` or `--url`, so only the env and
+  `containers.conf` matter.
+- nerdctl: `<address>#<namespace>`. Each part comes from the env,
+  else `nerdctl.toml`, else a default: `$CONTAINERD_ADDRESS`, else
+  the `address` key, else `local`; `$CONTAINERD_NAMESPACE`, else the
+  `namespace` key, else `default`. The toml is `$NERDCTL_TOML`, else
+  `/etc/nerdctl/nerdctl.toml` (rootful) or
+  `~/.config/nerdctl/nerdctl.toml` (rootless). An ID from another
+  namespace is "not found" too (`engine_context` null).
 
 The session lock compares `engine_host`, not the context name: two
-names can point at one host, and one name can be redefined.
+names can point at one host, and one name can be redefined. The
+compare is exact string equality, with no normalization: two strings
+for one daemon (`tcp://localhost:2375` and `tcp://127.0.0.1:2375`, a
+trailing slash, two docker contexts that reach one socket) count as
+different hosts. That fails closed (held), so it is safe; do not
+normalize.
 
 **The "create-then-cp-then-start" sequence is a hard requirement
 of the protocol.** Drivers that can't separate `create` from
