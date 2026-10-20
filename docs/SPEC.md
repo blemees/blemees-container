@@ -992,7 +992,9 @@ each container:
 
 - If `engine_id` is null (`start` has not yet reached `create`,
   §4.1 steps 7-10), `list` makes no engine call for that container,
-  shows the stored `state` and gives no warning.
+  shows the stored `state` and gives no warning. `list` does not
+  read the lock, so it cannot tell this from a `start` that was
+  killed in those steps (§8).
 - If `meta.json` has no `engine_host`, the pin cannot be built,
   `endpoint()` of the `meta.json` `engine` fails (also when that
   engine's binary is missing), or that endpoint is not the recorded
@@ -1006,12 +1008,22 @@ each container:
 - Else it runs the pinned `<engine> inspect <engine_id>`, by
   engine ID and not by name, so a container that reuses the name on
   the same host is not probed (as in the §3.6 lock check). Only an
-  answer from the recorded host can change `state`: `running` (or
-  `paused`, `restarting`) gives `running`; `exited` gives `stopped`;
-  `dead`, or no such container, gives `dead`; `created` (§4.1 steps
-  10-13, not started yet) changes nothing. If the probe fails
-  (engine not available, timeout, any other error), `list` shows
-  the stored state with the same warning and writes nothing.
+  answer from the recorded host can change `state`:
+  - `running`, `paused` or `restarting` gives `running`.
+  - `exited`, `dead`, or no such container, gives `dead` if the
+    stored `state` is `running`: the container ended with no clean
+    stop (a crash, §8; the TUI's `· dead`, §7.3.5). If the stored
+    `state` is `stopped` or `dead`, it changes nothing. Only `stop`
+    (§4.2 step 6) writes `stopped`, so a `list` that runs during a
+    `stop` is overwritten by `stop`.
+  - Any other value changes nothing: `created` (§4.1 steps 10-13),
+    podman's `stopped`, `stopping`, `configured`, `initialized` and
+    `unknown`, docker's and nerdctl's `removing`, and any value not
+    named here.
+
+  If the probe fails (engine not available, timeout, any other
+  error), `list` shows the stored state with the same warning and
+  writes nothing.
 
 `list` writes `state` into `meta.json` only from such an answer,
 so a failed or skipped probe never writes `dead`, and the state of
@@ -1472,6 +1484,7 @@ subprocess management.
 |---|---|
 | Container engine not installed | `blemees-container` exits with a clear error pointing at install instructions; nothing under `containers/` is touched |
 | Container start failed (image not found, mount denied, etc.) | `blemees-container` removes any partial `containers/<name>/` it created, releases any session lock it acquired, and exits non-zero |
+| `start` killed between writing `meta.json` (§4.1 step 7) and `create` (step 10) | Cleanup does not run. The state subdir stays with a null `engine_id`, and no engine container exists. `list` shows the stored `state` with no probe and no warning (§4.3). The lock is stale (dead PID, null `engine_id`), so a `start --resume` takes it over (§3.6). Remove the leftover `containers/<name>/` state and runtime subdirs by hand to use the name again |
 | Container process crashes after start | `agentd.sock` becomes stale; TUI's discovery probes it, gets connection-refused, marks the source as down. `blemees-container list` shows `state: dead`. Best-effort capture: if the container's agentd had time to flush, `blemees-container stop --force` still copies whatever is there to the host pool. If the copy-out fails, the pool entry stays at its pre-start state and `stop` keeps the lock and the container (§4.2 step 3). If the engine already removed the container, the lock is stale and the next `start --resume` takes it over |
 | `peerd.sock` mount missing | Container's MCP sidecar emits the existing "peerd unavailable" tool errors per `blemees-peer` SPEC §10. Agentd channel still works |
 | `--resume <id>` but session not in pool | `blemees-container start` exits non-zero before touching the engine. No partial state |

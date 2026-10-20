@@ -156,8 +156,12 @@ Spec milestone 3 — the headline cross-environment feature.
   other containers; `list` on the recorded host updates `state`
   through the pinned probe (argv carries the pin and the
   `engine_id`, not the name); `list` with a null `engine_id` makes
-  no engine call and no warning; a pinned probe that answers
-  `created` writes no `state`; a same-name container on the same
+  no engine call and no warning; a crash (pinned probe answers
+  `exited`, or no such container, while the stored `state` is
+  `running`) writes `dead`; `exited` with a stored `stopped` or
+  `dead` writes nothing; a pinned probe that answers `created` or
+  another value (podman `stopped`, `unknown`, `removing`) writes no
+  `state`; a same-name container on the same
   host with another engine ID does not change `state`; `list`
   compares the current endpoint of each `meta.json`'s own `engine`;
   `logs --source container`, and `logs` without `--follow` on a
