@@ -395,7 +395,12 @@ Lifecycle (timeline for `blemees-container start <name>` with
    null (§11 *Endpoint*). `start` resolves both before it writes the
    lock, so they are in the `O_EXCL` write. Locks are compared by
    `engine_host` only, as exact strings (§11 *Endpoint*);
-   `engine_context` is for messages. Acquire
+   `engine_context` is for messages. After the lock is written,
+   every engine call of `start` is pinned to its `engine_host`
+   (§11 *Pinning*), not to the current endpoint. `docker context
+   use` is global, so another shell can switch the context while
+   `start` runs; the pin keeps `create`, `cp`, `start` and cleanup on
+   the host in the lock. Acquire
    it under the lock guard (*Lock guard*, below):
    - `os.open(<id>.lock, O_WRONLY|O_CREAT|O_EXCL, 0o600)`, write the
      JSON, fsync the file and the sessions directory.
@@ -429,7 +434,10 @@ Lifecycle (timeline for `blemees-container start <name>` with
    under `$XDG_STATE_HOME/blemees/sessions/<id>/`. The host pool
    is **not** updated during the run; the host's copy on disk
    reflects the pre-start state until the container stops.
-7. **Stop: SIGTERM.** `blemees-container stop` sends SIGTERM to
+7. **Stop: SIGTERM.** `blemees-container stop` first checks the
+   lock against `meta.json` and pins its engine calls to the host in
+   `meta.json` (§4.2 step 0). Then it
+   sends SIGTERM to
    the container and *immediately* runs `<engine> wait <name>`
    (with a configurable timeout; default 30s). The agentd inside
    receives the signal, flushes its session state, exits cleanly.
@@ -439,7 +447,12 @@ Lifecycle (timeline for `blemees-container start <name>` with
      (below), read `<id>.lock` under the lock guard. The lock names
      this container if its `container_name` and `engine_id` equal
      the `name` and `engine_id` in `meta.json` (a null `engine_id`
-     names no container). If it names this
+     names no container). A lock that names this container but whose
+     `engine` or `engine_host` differs from `meta.json`, or is
+     missing, already made `stop` refuse in §4.2 step 0. If the lock
+     changed to that state after step 0, `stop` does not take it,
+     skips capture, and keeps the lock and the container (§4.2 step
+     3). If it names this
      container and its PID is not another live `blemees-container`
      process, rewrite it with `stop`'s PID and the same container
      and engine fields. `start` detaches and exits (§4.1), so its PID in the
@@ -597,16 +610,19 @@ order:
   closed). `start --resume` refuses with `session 'X' is checked
   out on engine host 'H' (context 'C')`, from the lock's
   `engine_host` and `engine_context` (without ` (context 'C')` if
-  `engine_context` is null), and tells the user to switch
-  back to that context (or set `DOCKER_HOST` / `CONTAINER_HOST` / `CONTAINER_CONNECTION`)
-  and run `stop` or `rm` there, or, if that host is gone for good,
-  to remove `<id>.lock` by hand, or
+  `engine_context` is null), and tells the user to run
+  `blemees-container stop Y` or `rm Y` (they act on the recorded
+  host from any context, §4.2 step 0), or, if that host is gone for
+  good, to remove `<id>.lock` by hand, or
 - its `engine_id` is not null and `<engine> inspect` of that
   `engine_id` finds a container that has started (running or
   exited). The check uses the engine ID, not the name, so a new
   container that reuses the name does not hold the lock. `<engine>`
   is the lock's `engine` field, not the `--engine` or auto-detected
-  engine of the current command.
+  engine of the current command. The `inspect` is pinned to the
+  lock's `engine_host` (§11 *Pinning*), so a context switch after
+  the check above cannot send it to another daemon. If the pin
+  cannot be built, the lock counts as live.
 
 A container that **never started** (`<engine> inspect` reports
 state `created`, or a zero `StartedAt`) does not keep the lock live.
@@ -656,8 +672,9 @@ same stale lock, and the second unlinks the first's fresh lock.
 Under the guard, check and takeover are one step. The guard is held
 only for the lock operation, never across engine `create`, `cp` or
 `wait`. The engine calls made under the guard are the stale
-check's endpoint resolution (§11 *Endpoint*) and `<engine>
-inspect`, each with a timeout.
+check's endpoint resolution (§11 *Endpoint*) and the pinned
+`<engine> inspect` with its pin check (§11 *Pinning*), each with a
+timeout.
 
 - **Rewrite** (`start` adds `engine_id`; `stop` puts its own PID):
   write `<id>.lock.tmp.<pid>`, fsync it, and `os.rename` it over
@@ -769,7 +786,13 @@ Behavior:
    - Without `--resume`: mint a fresh `session_id`.
 4. **Acquire session lock** per §3.6 step 2 (`O_EXCL` create of
    `<id>.lock` under the lock guard; takes over stale locks per §3.6
-   *Lock semantics*).
+   *Lock semantics*). From here on, every engine call (steps 10-14
+   and cleanup) is pinned to the lock's `engine_host` (§11
+   *Pinning*). If the pin cannot be built before `create`, `start`
+   cleans up as for a failed step 10 and exits non-zero. After
+   `create`, it cannot remove the container: it keeps the lock and
+   the state dir, prints the pin error, and exits non-zero. Run
+   `blemees-container rm <name>` when the pin works again.
 5. **Create state and runtime dirs** for the container:
    - `$XDG_STATE_HOME/blemees/containers/<name>/` (with `logs/` subdir)
    - `$XDG_RUNTIME_DIR/blemees/containers/<name>/`
@@ -778,7 +801,10 @@ Behavior:
    container has not started yet.
 7. **Write `meta.json`** to the state dir with all fields known so
    far (image, home, container_home, session_id, resumed_session,
-   auth_files, engine, …). `engine_id` stays null until step 10.
+   auth_files, engine, engine_host, engine_context, …).
+   `engine_host` and `engine_context` are copied from the lock
+   written in step 4, not resolved again. `engine_id` stays null
+   until step 10.
 8. **Pre-flight auth check.** For each `--auth <provider>`, read
    the host's auth file, run the access-token-only extractor, run
    the expiry pre-flight (§3.5). Any failure here aborts before
@@ -833,6 +859,37 @@ blemees-container stop <name>
 
 Lifecycle:
 
+0. **Pin.** This step comes before any engine call, also before the
+   never-started `inspect` (step 3).
+   - Read `name`, `engine`, `engine_host`, `engine_context`,
+     `engine_id` and `session_id` from `meta.json`.
+   - Under the lock guard, read `<session_id>.lock`. Do not rewrite
+     it.
+   - Refuse, and exit non-zero with no change to the lock,
+     `meta.json` or any container, if:
+     - `meta.json` has no `engine_host`: `container 'Y' has no
+       engine_host in meta.json`. Remove the container by hand with
+       `<engine> rm` on its engine host, then remove
+       `$XDG_STATE_HOME/blemees/containers/Y/` and, if it names this
+       container, `<id>.lock`.
+     - the lock names this container (§3.6 step 8) but its `engine`
+       or `engine_host` is not the same string as in `meta.json`, or
+       it has no `engine_host`: `meta.json and the session lock of
+       container 'Y' disagree on engine and engine host ('E1' 'H1'
+       vs 'E2' 'H2')`, `meta.json` first, with `none` for a missing
+       `engine_host`. Fix the files by hand.
+     - the pin cannot be built (§11 *Pinning*).
+   - Build the pin from the `meta.json` fields (§11 *Pinning*). Every
+     later engine call uses it: the `inspect`, the SIGTERM and
+     SIGKILL, `wait`, `cp`, `logs` and the `--rm` removal. They act
+     on the recorded host, not on the current endpoint, so a context
+     switch after `start` cannot point `stop` at another daemon's
+     container with the same name.
+   - If the current endpoint is not the recorded `engine_host`, warn
+     `container 'Y' is on engine host 'H' (context 'C'), not on the
+     current endpoint 'H2'` (without ` (context 'C')` if
+     `engine_context` is null) and go on against `H`. If `endpoint()`
+     fails, skip the warning.
 1. **Send SIGTERM** to the container (skipped if `--force`).
 2. **`<engine> wait <name>` with `--timeout`.** Block until the
    container exits or the timeout elapses. On timeout, send
@@ -847,6 +904,11 @@ Lifecycle:
      print a message naming the holder PID and exit non-zero. The
      holder finishes the stop. Without `--rm`, run `stop` again
      later (§3.6 step 8).
+   - If the lock names this container but its `engine` or
+     `engine_host` now differs from `meta.json` or is missing (the
+     lock changed after step 0), do not take it. Skip capture, step
+     4 (keep the lock) and step 7 (keep the container), still do
+     step 6, print the step 0 mismatch message, and exit non-zero.
    - If the lock is missing or names another container, this
      container no longer holds the session. Skip capture and step 4
      with a warning, still do steps 6 and 7, and exit zero.
@@ -886,7 +948,8 @@ Lifecycle:
    (or null if `--no-capture`, capture was skipped, or the copy-out
    failed).
 7. If `--rm` (unless step 3 keeps the container: another lock
-   holder, a missing `<session_id>/`, or a failed copy-out), also
+   holder, a lock changed to a mismatch after step 0, a missing
+   `<session_id>/`, or a failed copy-out), also
    remove the engine container and the runtime subdir, and release
    the session lock if it still names this container, as `rm` does
    (§4.6; this covers `--no-capture --rm`). The state subdir is
@@ -955,11 +1018,22 @@ Removes a stopped container's engine state, its runtime subdir,
 and its state subdir (logs included). Errors if the container is
 still running unless `--force` (which implies `stop --force` first).
 
+Before its first engine call, `rm` does §4.2 step 0: it reads
+`meta.json`, reads the lock under the guard without rewriting it,
+refuses on the same conditions with the same messages, builds the
+pin, and warns if the current endpoint differs. Its `inspect`, the
+`stop --force` and `<engine> rm` then use the pin, so they act on
+the recorded host.
+
 After it removes the engine container, `rm` checks the session
-lock. If the lock names this container (`container_name` and
+lock again. If the lock names this container (`container_name` and
 `engine_id` equal those in `meta.json`), `rm` warns that the
 container's session state was not captured (the pool keeps its last
-captured state), then releases the lock (§3.6 *Lock guard*).
+captured state), then releases the lock (§3.6 *Lock guard*). If the
+lock names this container but its `engine` or `engine_host` now
+differs from `meta.json` or is missing (it changed after step 0),
+`rm` keeps the lock and the state subdir, prints the step 0
+mismatch message, and exits non-zero.
 
 Does **not** touch the session pool entries — `rm` of a container
 does not delete its captured session.
@@ -1002,6 +1076,8 @@ dir, not runtime — see §3.7 for the reasoning):
 {
   "name": "test-env",
   "engine": "docker",
+  "engine_host": "unix:///var/run/docker.sock",
+  "engine_context": "default",
   "engine_id": "9f7a3b2c…",
   "image": "blemees:latest",
   "home": "~/projects/foo",
@@ -1037,6 +1113,12 @@ Field notes:
   returns it and is written in §4.1 step 10, before the session
   lock is rewritten with it. `stop` and `rm` match the lock against
   these two fields (§3.6 step 8, §4.6).
+- `engine_host` and `engine_context` name the daemon that holds the
+  engine container (§11 *Endpoint*). They are written in §4.1 step
+  7 with the values in the session lock, and never change. Every
+  engine call that `stop` and `rm` make is pinned to them (§4.2
+  step 0, §11 *Pinning*). A `meta.json` with no `engine_host` makes
+  `stop` and `rm` refuse.
 - `container_home` is the value passed via the required
   `--container-home` flag (§3.5).
 - `session_id` is the single session this container hosts (§3.0).
@@ -1320,7 +1402,10 @@ subprocess management.
 | `--resume <id>` but session is locked by a live container | `blemees-container start` judges the lock (§3.6 *Lock semantics*): live if its PID is a live `blemees-container` process or its engine container has started and still exists, also after `start` has exited. If live, exits with `session 'X' is currently checked out by container 'Y' (pid 4711)`. Suggests `blemees-container stop Y` first, or `blemees-container rm Y` if `Y` is already stopped (a failed copy-out or a missing `<id>/` keeps the lock) |
 | `--resume <id>` but the lock is stale (dead PID, same engine host, and no started engine container) | `blemees-container start` takes over the stale lock, logs a warning naming the prior holder, and proceeds |
 | `--resume <id>` but the engine cannot answer the stale check (binary missing, daemon down, timeout) | The lock counts as live (fail closed). `start` refuses and tells the user to start the engine or, if the container is really gone, to remove `<id>.lock` by hand |
-| Engine context / `DOCKER_HOST` switched while a session is checked out | The lock's `engine_host` is not the current endpoint, so the lock counts as held, even with a dead PID; the engine is not queried (§3.6 *Lock semantics*). `start --resume` refuses with `session 'X' is checked out on engine host 'H' (context 'C')` (without ` (context 'C')` if `engine_context` is null; a valid lock with no `engine_host` gives `session 'X' is checked out on an unknown engine host (lock has no engine_host)`) and tells the user to switch back to that context (or set `DOCKER_HOST` / `CONTAINER_HOST` / `CONTAINER_CONNECTION`) and run `stop` or `rm` there, or to remove `<id>.lock` by hand if that host is gone for good |
+| Engine context / `DOCKER_HOST` switched while a session is checked out | The lock's `engine_host` is not the current endpoint, so the lock counts as held, even with a dead PID; the engine is not queried (§3.6 *Lock semantics*). `start --resume` refuses with `session 'X' is checked out on engine host 'H' (context 'C')` (without ` (context 'C')` if `engine_context` is null; a valid lock with no `engine_host` gives `session 'X' is checked out on an unknown engine host (lock has no engine_host)`) and tells the user to run `blemees-container stop Y` or `rm Y` (they act on the recorded host from any context), or to remove `<id>.lock` by hand if that host is gone for good. `stop` and `rm` pin to the host in `meta.json` (§4.2 step 0), warn that the current endpoint differs, and act on the recorded host, never on a same-name container of the current host. If the pin cannot be built, they refuse (below) |
+| Engine context switched while `start` runs (`docker context use` in another shell) | Every engine call after the lock is written is pinned to the lock's `engine_host` (§4.1 step 4, §11 *Pinning*), so `create`, `cp`, `start` and cleanup stay on that host |
+| `meta.json` has no `engine_host`, or it and the session lock disagree on `engine` or `engine_host` | `stop` and `rm` refuse in §4.2 step 0, before their first engine call, and change nothing: `container 'Y' has no engine_host in meta.json`, or `meta.json and the session lock of container 'Y' disagree on engine and engine host ('E1' 'H1' vs 'E2' 'H2')`. If the lock changes to a mismatch after step 0, `stop` skips capture and keeps the lock and the container (§4.2 step 3), and `rm` keeps the lock and the state subdir (§4.6) |
+| The pin cannot be built (the podman connection was removed or now points at another URI; podman or the nerdctl address is no longer `local`) | The command refuses with `cannot pin to engine host 'H' (context 'C'): <reason>` and exits non-zero (§11 *Pinning*). The lock check counts the lock as live. `start` after `create` keeps the lock and the state dir (§4.1 step 4) |
 | Auth copy-in fails (file missing on host) | `blemees-container start` exits non-zero before starting the agent. Container is removed; lock (if any) is released |
 | `--auth <provider>` but host's access token is expired or expires within 5 min | `blemees-container start` refuses with a clear error directing user to re-auth on host. No container is created |
 | Access token expires mid-session inside the container | Agent's API calls start failing. Container's agentd reports the failure on its operator channel. User runs `blemees-container stop` (captures session state) and starts a fresh container if continuing |
@@ -1453,6 +1538,11 @@ class ContainerEngine(Protocol):
         driver talks to now. Does not contact the daemon. Recorded in
         and checked against the session lock (§3.6)."""
 
+    def pin(self, engine_host: str, engine_context: str | None) -> "ContainerEngine":
+        """Return a driver whose every call targets that recorded host,
+        not the current endpoint (§11 *Pinning*). Raises if the pin
+        cannot be built."""
+
     def create(
         self,
         container_name: str,
@@ -1567,8 +1657,9 @@ order:
   `CONTAINERS_CONF_OVERRIDE` goes last). If the value cannot be
   decided (a layer cannot be read or parsed), `endpoint()` fails
   and the lock counts as live (§3.6 *Lock semantics*).
-  `blemees-container` never passes `--remote`, `--connection` or
-  `--url`, so only the env and `containers.conf` matter.
+  Unpinned calls never pass `--remote`, `--connection` or `--url`,
+  so for `endpoint()` only the env and `containers.conf` matter.
+  Pinned calls pass `--connection` or `--url` (*Pinning*, below).
 - nerdctl: `<address>#<namespace>`. Each part comes from the env,
   else `nerdctl.toml`, else a default: `$CONTAINERD_ADDRESS`, else
   the `address` key, else `local`; `$CONTAINERD_NAMESPACE`, else the
@@ -1584,6 +1675,58 @@ for one daemon (`tcp://localhost:2375` and `tcp://127.0.0.1:2375`, a
 trailing slash, two docker contexts that reach one socket) count as
 different hosts. That fails closed (held), so it is safe; do not
 normalize.
+
+**Pinning.** A pinned call targets a recorded `engine_host`, not the
+current endpoint. These calls are pinned: every call of `start`
+after it writes the lock (§4.1 step 4), every call of `stop` and
+`rm` (§4.2 step 0, §4.6), and the `inspect` of the lock check (§3.6
+*Lock semantics*). `endpoint()` and `is_available()` are not pinned.
+The driver puts the host on the command line, which each engine CLI
+ranks above its env and config files, passes `engine_host` verbatim,
+and removes the engine's endpoint variables from the call's env:
+
+- docker: `docker --host <engine_host>`, without `DOCKER_HOST` and
+  `DOCKER_CONTEXT` in the env. Never `--context`: docker refuses it
+  together with `--host`. Pin by host, not by context name: the
+  host string is what the lock compares, and a context can be
+  repointed (`docker context update`) or removed between two calls.
+  `--host` does not use TLS material stored in a context. Remote
+  daemons are out of scope (§10, *Cross-host containers*), and such
+  a call fails; it does not reach another host.
+- podman, without `CONTAINER_HOST` and `CONTAINER_CONNECTION` in
+  the env:
+  - `engine_context` set (a connection): `podman --connection
+    <engine_context>`. A connection holds more than its URI (an SSH
+    identity, as for `podman machine` on macOS), so `--url` alone
+    cannot replace it. Before each pinned call, the driver reads
+    that connection's URI (`podman system connection list --format
+    json`) and refuses unless it equals `engine_host`. A repoint
+    between that read and the call is not caught; this window is
+    narrow and accepted.
+  - `engine_context` null, `engine_host` a URI: `podman --url
+    <engine_host>`. Podman reads `CONTAINER_SSHKEY` only when
+    `CONTAINER_HOST` is in the env, which the pin removes, so if
+    `CONTAINER_SSHKEY` is set, also pass `--identity
+    "$CONTAINER_SSHKEY"`.
+  - `engine_host` is `local`: podman has no flag that forces local
+    mode. The driver passes no flag and refuses unless `endpoint()`,
+    resolved with the call's env, still gives `local`.
+- nerdctl: split `engine_host` at its last `#` into address and
+  namespace. `nerdctl --address <address> --namespace <namespace>`,
+  without `CONTAINERD_ADDRESS` and `CONTAINERD_NAMESPACE` in the
+  env. If the address is `local`, pass only `--namespace`, and refuse
+  unless the address part of `endpoint()`, resolved with the call's
+  env, is still `local`.
+
+A refusal is `cannot pin to engine host 'H' (context 'C'): <reason>`
+(without ` (context 'C')` if `engine_context` is null), where
+`<reason>` is `connection 'C' now points at 'H2'`, `no connection
+'C'`, or `<engine> now resolves to 'H2'`. The refused call is not
+made, and the command exits non-zero (in the lock check, the lock
+counts as live; §3.6). The message tells the user to point the
+connection back at `H` or undo the config change, or, if that host
+is gone for good, to remove `$XDG_STATE_HOME/blemees/containers/<name>/`
+and `<id>.lock` by hand.
 
 **The "create-then-cp-then-start" sequence is a hard requirement
 of the protocol.** Drivers that can't separate `create` from
@@ -1634,7 +1777,9 @@ v0.1 engines support this naturally.
    `--no-capture`, session lockfiles (sibling `<id>.lock`, `O_EXCL`
    create under a `flock` guard, live while the PID or the engine
    container has started and exists; held if taken on another
-   engine host) with stale takeover, sequenced wait+cp.
+   engine host) with stale takeover, sequenced wait+cp. Engine
+   calls pinned to the recorded engine host (§11 *Pinning*):
+   `start` after the lock, and all of `stop` and `rm`.
    Rename-aside capture commit with crash recovery; a failed
    copy-out keeps the lock (§3.6). Medium-large.
 8. **TUI multi-agentd registry** — replace single client with

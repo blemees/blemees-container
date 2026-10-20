@@ -74,7 +74,12 @@ Spec milestone 3 — the headline cross-environment feature.
   `flock` guard `.lock-guard`, and live while its PID is a live
   `blemees-container` process or its engine container has started and still exists.
   The lock records `engine_host`; a lock from another engine host is
-  held, not stale.
+  held, not stale. `meta.json` records the same `engine_host` and
+  `engine_context`. The driver's `pin()` pins every engine call of
+  `start` after the lock is written, of `stop` and of `rm` to that
+  host ([SPEC §11 *Pinning*](SPEC.md#11-engine-driver-protocol));
+  `stop` and `rm` refuse if `meta.json` has no `engine_host` or
+  disagrees with the lock ([SPEC §4.2 step 0](SPEC.md#42-stop)).
   Sequenced wait+cp. `stop` takes the session lock with its own PID
   before capture, then the rename-aside capture commit with per-PID
   temp names and crash recovery (`<id>` → `<id>.old.<pid>`,
@@ -106,6 +111,33 @@ Spec milestone 3 — the headline cross-environment feature.
   `endpoint()` fail; the nerdctl endpoint includes the
   namespace and takes `address` / `namespace` from `nerdctl.toml`
   when the env is unset (the env wins over the toml).
+  Pinning tests (a fake engine records the argv and env of each
+  call): `start` writes the same `engine_host` and `engine_context`
+  to `meta.json` and the lock; a context switch between the lock
+  write and `create` still sends `create`, `cp` and `start` to the
+  lock's host; `stop` after a context switch to a host with a
+  container of the same name waits on, copies out of and (with
+  `--rm`) removes the recorded host's container, warns, and releases
+  the lock; `rm` after a switch does the same; the lock check's
+  `inspect` is pinned; `meta.json` and the lock disagree on
+  `engine` or `engine_host` → `stop` and `rm` refuse in step 0 with
+  no engine call and no file change; `meta.json` without
+  `engine_host` → they refuse the same way; a lock that changes to a
+  mismatch between `stop`'s step 0 and step 3 is not taken, and
+  `stop` skips capture and keeps the lock and the container; the
+  same change before `rm`'s second lock check keeps the lock and the
+  state dir; the `stop` SIGTERM/SIGKILL calls are pinned; a pinned
+  podman `--url` call carries `--identity` when `CONTAINER_SSHKEY` is
+  set; a pinned docker
+  call has `--host` and no `--context`, and its env has no
+  `DOCKER_HOST` or `DOCKER_CONTEXT`; podman uses `--connection` when
+  `engine_context` is set, refuses if that connection was removed or
+  now has another URI, and uses `--url` when it is null; podman
+  `local` passes no flag and refuses if `endpoint()` is no longer
+  `local`; nerdctl passes `--address` and `--namespace` (only
+  `--namespace` for a `local` address) and has no `CONTAINERD_*`
+  vars in the env; a pin that fails after `create` keeps the lock
+  and the state dir.
 
 ## Phase 4 — "Unified TUI"
 
